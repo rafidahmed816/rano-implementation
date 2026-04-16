@@ -1,0 +1,45 @@
+defaults:
+  - _self_
+
+# Model
+mel_channels: 80
+embed_dim: 256
+num_cinn_blocks: 8
+num_acg_blocks: 8
+hidden: 512
+
+# Loss
+lambda1: 1.0
+lambda2: 5.0
+margin: 0.3
+acg_tau: 0.5
+
+# Data
+vctk_root: data/vctk/VCTK-Corpus/VCTK-Corpus
+libritts_root: data/libritts/LibriTTS
+libritts_subsets:
+  - train-clean-100
+max_frames: 256
+sample_rate: 22050
+
+# Training stage 1 (ACG)
+stage1:
+  iterations: 100000
+  lr: 1.0e-5
+  batch_size: 32
+  lr_step: 20000
+
+# Training stage 2 (Rano)
+stage2:
+  iterations: 200000
+  lr: 1.0e-5
+  batch_size: 16
+  lr_step: 50000
+  distance_threshold: 0.3
+
+# Checkpoints
+asv_checkpoint: checkpoints/asv.pt
+acg_checkpoint: checkpoints/acg/acg_final.pt
+output_dir: checkpoints/rano
+log_dir: logs/rano
+num_workers: 4
