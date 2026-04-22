@@ -9,7 +9,7 @@ from blocks import CINNBlock, INNBlock
 from loss import RanoLoss
 from metrics import compute_pitch_correlation, compute_wer
 from model import Rano
-from speaker_encoder import SpeakerEncoder
+from speaker_encoder import AdaINVCSpeakerEncoder
 
 
 B, F, T, D = 2, 80, 64, 256
@@ -34,16 +34,17 @@ class TestINNBlock:
 class TestCINNBlock:
     def test_forward_shape(self):
         block = CINNBlock(F, D)
-        x = torch.randn(B, F, 16, T)
-        c = torch.randn(B, D)
-        y = block(x, c)
+        x = torch.randn(B, F, T)      # (B, 80, T) — 1D
+        c = torch.randn(B, D)          # (B, 256) condition
+        y, ld = block(x, c)
         assert y.shape == x.shape
+        assert ld.shape == (B,)
 
     def test_invertibility(self):
         block = CINNBlock(F, D)
-        x = torch.randn(B, F, 16, T)
+        x = torch.randn(B, F, T)
         c = torch.randn(B, D)
-        y = block(x, c)
+        y, _ = block(x, c)
         x_rec = block.inverse(y, c)
         assert torch.allclose(x, x_rec, atol=1e-4)
 
@@ -55,6 +56,13 @@ class TestACG:
         sa = acg.generate(key)
         assert sa.shape == (B, D)
 
+    def test_invertibility(self):
+        acg = AnonymizationConditionGenerator(D, num_blocks=2)
+        s = torch.randn(B, D)
+        z, _ = acg(s)
+        s_rec = acg.generate(z)
+        assert torch.allclose(s, s_rec, atol=1e-4)
+
     def test_nll_loss_positive(self):
         acg = AnonymizationConditionGenerator(D, num_blocks=2)
         s = torch.randn(B, D)
@@ -65,24 +73,25 @@ class TestACG:
 class TestAnonymizer:
     def test_forward_shape(self):
         anon = Anonymizer(F, D, num_blocks=2)
-        x = torch.randn(B, 1, F, T)
-        c = torch.randn(B, D, 1, 1)
-        xa = anon(x, c)
+        x = torch.randn(B, F, T)       # (B, 80, T)
+        c = torch.randn(B, D)          # (B, 256)
+        xa, ld = anon(x, c)
         assert xa.shape == x.shape
+        assert ld.shape == (B,)
 
     def test_invertibility(self):
         anon = Anonymizer(F, D, num_blocks=2)
-        x = torch.randn(B, 1, F, T)
-        c = torch.randn(B, D, 1, 1)
-        xa = anon(x, c)
+        x = torch.randn(B, F, T)
+        c = torch.randn(B, D)
+        xa, _ = anon(x, c)
         xr = anon.inverse(xa, c)
-        assert torch.allclose(x, xr, atol=1e-4)
+        assert torch.allclose(x, xr, atol=1e-4), "Restoration must be lossless"
 
 
 class TestSpeakerEncoder:
     def test_output_normalised(self):
-        enc = SpeakerEncoder(F, D)
-        mel = torch.randn(B, 1, F, T)
+        enc = AdaINVCSpeakerEncoder(F, D)
+        mel = torch.randn(B, F, T)     # (B, 80, T)
         emb = enc(mel)
         norms = torch.norm(emb, dim=-1)
         assert torch.allclose(norms, torch.ones(B), atol=1e-5)
@@ -91,8 +100,8 @@ class TestSpeakerEncoder:
 class TestRanoLoss:
     def test_loss_keys(self):
         loss_fn = RanoLoss()
-        x = torch.randn(B, 1, F, T)
-        x_hat = torch.randn(B, 1, F, T)
+        x = torch.randn(B, F, T)
+        x_hat = torch.randn(B, F, T)
         anchor = torch.randn(B, D)
         pos = torch.randn(B, D)
         neg = torch.randn(B, D)
@@ -117,7 +126,7 @@ class TestRanoModel:
     def test_anonymize_restore_cycle(self):
         model = Rano(F, D, num_cinn_blocks=2, num_acg_blocks=2)
         model.eval()
-        x = torch.randn(1, 1, F, T)
+        x = torch.randn(1, F, T)       # (1, 80, T)
         key = torch.randn(1, D)
         with torch.no_grad():
             xa, _ = model.anonymize(x, key)
@@ -126,8 +135,13 @@ class TestRanoModel:
 
     def test_different_keys_give_different_anon(self):
         model = Rano(F, D, num_cinn_blocks=2, num_acg_blocks=2)
+        # Perturb subnet weights slightly so different conditions produce different outputs
+        # (at zero-init, all conditions map identically)
+        with torch.no_grad():
+            for p in model.anonymizer.parameters():
+                p.add_(torch.randn_like(p) * 0.01)
         model.eval()
-        x = torch.randn(1, 1, F, T)
+        x = torch.randn(1, F, T)
         k1, k2 = torch.randn(1, D), torch.randn(1, D)
         with torch.no_grad():
             xa1, _ = model.anonymize(x, k1)

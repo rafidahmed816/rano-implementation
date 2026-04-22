@@ -1,12 +1,12 @@
 """
-CLI: anonymize or restore audio files.
+CLI: anonymize or restore audio files (§4.1, §4.2).
 
 Usage:
   # Anonymize (speaker-level: same key per speaker folder)
-  uv run scripts/infer.py anonymize --input audio/ --output anon/ --checkpoint rano_final.pt
+  python infer.py anonymize --input audio/ --output anon/ --checkpoint rano_final.pt
 
   # Restore (requires the same key used during anonymization)
-  uv run scripts/infer.py restore --input anon/ --output restored/ --checkpoint rano_final.pt --key_file keys.pt
+  python infer.py restore --input anon/ --output restored/ --checkpoint rano_final.pt --key_file keys.json
 """
 
 import argparse
@@ -44,6 +44,10 @@ def anonymize_dir(args):
             wav, sr = torchaudio.load(path)
             wav = processor.resample(wav.mean(0), sr)
             mel = processor.wav_to_mel(wav).to(device)
+            # Ensure (B, 80, T) shape
+            if mel.dim() == 4:
+                mel = mel.squeeze(1)
+
             xa, _ = model.anonymize(mel, key)
 
             out_path = out_dir / path.relative_to(args.input).with_suffix(".wav")
@@ -77,10 +81,15 @@ def restore_dir(args):
             if spk not in key_store:
                 print(f"  [WARN] No key for speaker {spk}, skipping {path}")
                 continue
-            key = torch.tensor(key_store[spk], device=device).unsqueeze(0)
+            key = torch.tensor(key_store[spk], device=device)
+            if key.dim() == 1:
+                key = key.unsqueeze(0)
             wav, sr = torchaudio.load(path)
             wav = processor.resample(wav.mean(0), sr)
             mel = processor.wav_to_mel(wav).to(device)
+            if mel.dim() == 4:
+                mel = mel.squeeze(1)
+
             xr = model.restore(mel, key)
 
             out_path = out_dir / path.relative_to(args.input)
@@ -90,7 +99,7 @@ def restore_dir(args):
 
 
 def _load_model(args, device):
-    model = Rano(embed_dim=args.embed_dim).to(device)
+    model = Rano(embed_dim=args.embed_dim, num_cinn_blocks=args.num_cinn_blocks).to(device)
     model.load_state_dict(torch.load(args.checkpoint, map_location=device))
     model.eval()
     return model
@@ -106,6 +115,7 @@ if __name__ == "__main__":
         sp.add_argument("--output", required=True)
         sp.add_argument("--checkpoint", required=True)
         sp.add_argument("--embed_dim", type=int, default=256)
+        sp.add_argument("--num_cinn_blocks", type=int, default=12)
         if cmd == "restore":
             sp.add_argument("--key_file", required=True)
 

@@ -8,7 +8,7 @@ import torch.nn as nn
 from acg import AnonymizationConditionGenerator
 from anonymizer import Anonymizer
 from loss import RanoLoss
-from speaker_encoder import SpeakerEncoder
+from speaker_encoder import AdaINVCSpeakerEncoder
 
 
 class Rano(nn.Module):
@@ -16,19 +16,18 @@ class Rano(nn.Module):
     Full Rano model (Fig. 2 in paper).
 
     Components (all inter-connected during training):
-      - acg: generates anonymous speaker embedding from key
+      - acg: generates anonymous speaker embedding from key (frozen in Stage 2)
       - anonymizer: cINN forward — x + cond → xa
       - restorer: cINN inverse (same weights) — xa + cond → xr
-      - asv: differentiable speaker encoder for contrastive + consistency losses
+      - asv: AdaIN-VC speaker encoder (frozen in Stage 2)
     """
 
     def __init__(
         self,
         mel_channels: int = 80,
         embed_dim: int = 256,
-        num_cinn_blocks: int = 8,
-        num_acg_blocks: int = 8,
-        hidden: int = 512,
+        num_cinn_blocks: int = 12,   # §2.2: N_inn = 12
+        num_acg_blocks: int = 8,     # §2.1: N_acg = 8
         lambda1: float = 1.0,
         lambda2: float = 5.0,
         margin: float = 0.3,
@@ -37,7 +36,7 @@ class Rano(nn.Module):
         super().__init__()
         self.acg = AnonymizationConditionGenerator(embed_dim, num_acg_blocks)
         self.anonymizer = Anonymizer(mel_channels, embed_dim, num_cinn_blocks)
-        self.asv = SpeakerEncoder(mel_channels, embed_dim, hidden)
+        self.asv = AdaINVCSpeakerEncoder(mel_channels, embed_dim)
         self.loss_fn = RanoLoss(lambda1, lambda2, margin)
         self.acg_tau = acg_tau
 
@@ -50,42 +49,50 @@ class Rano(nn.Module):
         return self.acg.loss(speaker_embeddings, self.acg_tau)
 
     # ------------------------------------------------------------------
-    # Stage 2: train anonymizer
+    # Stage 2: train anonymizer (Algorithm 1)
     # ------------------------------------------------------------------
 
     def training_step(
         self,
         x: torch.Tensor,
-        distance_threshold: float = 0.3,
+        distance_threshold: float = 0.5,   # §7: d = 0.5 (L2)
     ) -> dict[str, torch.Tensor]:
         """
         Algorithm 1 in paper: generate key, anonymize, compute Lcons + Ltri.
-        x: (B, 1, F, T) mel-spectrogram batch.
+        x: (B, 80, T) mel-spectrogram batch.
         Returns loss dict with keys: total, consistency, triplet.
         """
-        s = self.asv(x)  # original speaker embeddings
+        # Step 2: extract speaker embedding (frozen ASV — §8.1)
+        with torch.no_grad():
+            s = self.asv(x)
 
-        # Sample key until far enough from original (Algorithm 1 lines 2-4)
+        # Steps 3-5: sample key, compute condition, ensure L2 distance > d
         cond = self._sample_far_key(s, distance_threshold)
 
-        # Forward process 1: xa = f(x; cond)
-        xa = self.anonymizer(x, cond.unsqueeze(-1).unsqueeze(-1))
+        # Step 6: xa = Anonymizer(x, cond) — forward anonymization
+        xa, _ = self.anonymizer(x, cond)
 
-        # Forward process 2: x_hat = f(x; s) — identity transform expectation
-        x_hat = self.anonymizer(x, s.unsqueeze(-1).unsqueeze(-1))
+        # Step 7: x_hat = Anonymizer(x, s) — consistency check with real embedding
+        x_hat, _ = self.anonymizer(x, s)
 
-        # Contrastive: anchor = asv(xa), positive = cond, negative = s
-        anchor_emb = self.asv(xa.detach())
+        # Step 8: L_cons = MSE(x, x_hat)  (Eq. 5)
+        # Step 9: emb_ano = ASV(xa) — speaker embedding of anonymized speech
+        # NOTE: do NOT detach xa — triplet gradient must flow through anonymizer
+        with torch.no_grad():
+            anchor_emb = self.asv(xa)
 
+        # Steps 10-11: L_tri + L_total
         return self.loss_fn(x, x_hat, anchor_emb, cond, s)
 
     def _sample_far_key(self, s: torch.Tensor, d: float) -> torch.Tensor:
-        """Sample anonymous embedding sufficiently far from real speaker embedding."""
+        """Sample anonymous embedding with L2 distance > d from real embedding (§3.1 step 5)."""
         device = s.device
         for _ in range(50):  # max retries
             key = torch.randn_like(s)
-            cond = self.acg.generate(key)
-            dist = 1.0 - torch.nn.functional.cosine_similarity(s, cond).mean()
+            with torch.no_grad():
+                cond = self.acg.generate(key)
+            # Paper §7: threshold d=0.5 is L2 distance
+            dist = torch.norm(s - cond, dim=-1).mean()
             if dist.item() > d:
                 return cond
         return cond  # fallback: use last sample
@@ -97,17 +104,16 @@ class Rano(nn.Module):
     @torch.no_grad()
     def anonymize(self, x: torch.Tensor, key: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Anonymize speech mel-spectrogram.
-        Returns (anonymized_mel, cond) — cond needed for restoration.
+        Anonymize speech mel-spectrogram (§4.1).
+        x: (B, 80, T), key: (B, 256).
+        Returns (anonymized_mel, cond) — store key for restoration.
         """
         cond = self.acg.generate(key)
-        c = cond.unsqueeze(-1).unsqueeze(-1)
-        xa = self.anonymizer(x, c)
+        xa, _ = self.anonymizer(x, cond)
         return xa, cond
 
     @torch.no_grad()
     def restore(self, xa: torch.Tensor, key: torch.Tensor) -> torch.Tensor:
-        """Restore anonymized mel → original mel using the correct key (lossless)."""
+        """Restore anonymized mel → original mel using the correct key (lossless, §4.2)."""
         cond = self.acg.generate(key)
-        c = cond.unsqueeze(-1).unsqueeze(-1)
-        return self.anonymizer.inverse(xa, c)
+        return self.anonymizer.inverse(xa, cond)

@@ -1,4 +1,7 @@
-"""Audio ↔ Mel-spectrogram conversion utilities."""
+"""Audio ↔ Mel-spectrogram conversion utilities.
+
+All mel-spectrograms are shape (B, 80, T) — 1D along time axis.
+"""
 
 import torch
 import torchaudio
@@ -8,7 +11,8 @@ import torchaudio.transforms as T
 class MelProcessor:
     """
     Converts waveforms ↔ mel-spectrograms at 22050 Hz (paper's sample rate).
-    All spectrograms are log-scaled and normalised to [-1, 1].
+    All spectrograms are log-scaled.
+    Output shape: (B, n_mels, T) — no channel dim.
     """
 
     def __init__(
@@ -37,22 +41,23 @@ class MelProcessor:
         self.grifflim = T.GriffinLim(n_fft=n_fft, hop_length=hop_length, win_length=win_length)
 
     def wav_to_mel(self, wav: torch.Tensor) -> torch.Tensor:
-        """wav: (B, T) or (T,) → mel: (B, 1, F, T_frames), log-scaled."""
+        """wav: (B, T) or (T,) → mel: (B, n_mels, T_frames), log-scaled."""
         if wav.dim() == 1:
             wav = wav.unsqueeze(0)
         mel = self.mel_transform(wav)
         mel = torch.log(mel.clamp(min=1e-5))
-        return mel.unsqueeze(1)  # add channel dim
+        return mel  # (B, 80, T_frames)
 
     def mel_to_wav_grifflim(self, mel: torch.Tensor) -> torch.Tensor:
-        """Approximate inversion via Griffin-Lim (vocoder-free baseline)."""
-        mel = mel.squeeze(1)
+        """Approximate inversion via Griffin-Lim (vocoder-free baseline).
+        mel: (B, 80, T) or (1, 80, T) → wav.
+        """
         mel = torch.exp(mel)
         spec = self.inv_mel(mel)
         return self.grifflim(spec)
 
     def resample(self, wav: torch.Tensor, orig_sr: int) -> torch.Tensor:
-        """Resample to target sample_rate in-place."""
+        """Resample to target sample_rate."""
         if orig_sr == self.sample_rate:
             return wav
         return torchaudio.functional.resample(wav, orig_sr, self.sample_rate)
