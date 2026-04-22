@@ -8,8 +8,6 @@ Inverse:  key ~ N(0,1) → anonymous_speaker_embedding  (inference).
 import torch
 import torch.nn as nn
 from blocks import INNBlock, FixedPermutation
-
-
 class AnonymizationConditionGenerator(nn.Module):
     def __init__(self, embed_dim: int = 256, num_blocks: int = 8):
         super().__init__()
