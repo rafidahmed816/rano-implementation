@@ -77,9 +77,10 @@ class Rano(nn.Module):
 
         # Step 8: L_cons = MSE(x, x_hat)  (Eq. 5)
         # Step 9: emb_ano = ASV(xa) — speaker embedding of anonymized speech
-        # NOTE: do NOT detach xa — triplet gradient must flow through anonymizer
-        with torch.no_grad():
-            anchor_emb = self.asv(xa)
+        # ASV params are frozen (requires_grad=False) so no ASV weights update,
+        # but we must NOT use no_grad here — L_tri gradient must flow through
+        # the ASV computation graph back into xa and then into the anonymizer.
+        anchor_emb = self.asv(xa)
 
         # Steps 10-11: L_tri + L_total
         return self.loss_fn(x, x_hat, anchor_emb, cond, s)

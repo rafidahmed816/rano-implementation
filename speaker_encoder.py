@@ -1,11 +1,9 @@
 """Speaker encoders for Rano (§1.2, §2.4).
-
 Training ASV:   AdaIN-VC speaker encoder (pre-trained, frozen).
 Evaluation ASV: ECAPA-TDNN from SpeechBrain (separate, never used in training).
 """
 
 from __future__ import annotations
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

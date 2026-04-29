@@ -1,19 +1,11 @@
-"""Stage 2: Train Rano anonymizer with pre-trained (frozen) ACG (§3, Alg. 1)."""
-
 import argparse
-import os
 from pathlib import Path
-
-# Must be set BEFORE torch is imported to take effect
-os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
-
 import torch
 from torch.optim import Adam
 from torch.optim.lr_scheduler import StepLR
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
-
 from model import Rano
 from audio import MelProcessor
 from data import build_dataset
@@ -72,20 +64,9 @@ def train_rano(args):
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── Resume from checkpoint ─────────────────────────────────────────────
-    start_step = 1
-    resume_ckpt = out_dir / "training_state.pt"
-    if args.resume and resume_ckpt.exists():
-        state = torch.load(resume_ckpt, map_location=device)
-        model.anonymizer.load_state_dict(state["anonymizer"])
-        optimizer.load_state_dict(state["optimizer"])
-        scheduler.load_state_dict(state["scheduler"])
-        start_step = state["step"] + 1
-        print(f"Resumed from step {start_step - 1}")
-
     optimizer.zero_grad()
     data_iter = iter(loader)
-    for step in tqdm(range(start_step, args.iterations + 1), desc="Rano training"):
+    for step in tqdm(range(1, args.iterations + 1), desc="Rano training"):
         try:
             batch = next(data_iter)
         except StopIteration:
@@ -99,8 +80,7 @@ def train_rano(args):
 
         losses = model.training_step(mel, distance_threshold=args.distance_threshold)
 
-        # Divide loss by accumulate_steps so the accumulated gradient equals
-        # the mean over the full effective batch
+        # Divide loss by accumulate_steps so the accumulated gradient matches the mean over the effective batch
         loss_to_backprop = losses["total"] / args.accumulate_steps
         loss_to_backprop.backward()
 
@@ -122,22 +102,9 @@ def train_rano(args):
                 f"  tri={losses['triplet'].item():.4f}"
             )
 
-        # §3: save every 10,000 iterations + full training state for resume
+        # §3: save every 10,000 iterations
         if step % 10_000 == 0:
             torch.save(model.anonymizer.state_dict(), out_dir / f"anonymizer_step{step}.pt")
-            torch.save(
-                {
-                    "step": step,
-                    "anonymizer": model.anonymizer.state_dict(),
-                    "optimizer": optimizer.state_dict(),
-                    "scheduler": scheduler.state_dict(),
-                },
-                resume_ckpt,
-            )
-
-        # Periodically flush GPU cache to prevent fragmentation build-up
-        if step % 500 == 0:
-            torch.cuda.empty_cache()
 
     torch.save(model.anonymizer.state_dict(), out_dir / "anonymizer_final.pt")
     torch.save(model.state_dict(), out_dir / "rano_final.pt")
@@ -176,25 +143,23 @@ if __name__ == "__main__":
     p.add_argument("--log_dir", type=str, default="logs/rano")
     p.add_argument("--mel_channels", type=int, default=80)
     p.add_argument("--embed_dim", type=int, default=256)
-    p.add_argument("--num_cinn_blocks", type=int, default=12)   # §2.2: 12 blocks
+    p.add_argument("--num_cinn_blocks", type=int, default=12)  # §2.2: 12 blocks
     p.add_argument("--num_acg_blocks", type=int, default=8)
     p.add_argument("--lambda1", type=float, default=1.0)
     p.add_argument("--lambda2", type=float, default=5.0)
     p.add_argument("--margin", type=float, default=0.3)
     p.add_argument("--batch_size", type=int, default=4, help="Physical batch size per step.")
     p.add_argument(
-        "--accumulate_steps", type=int, default=4,
-        help="Gradient accumulation steps. Effective batch = batch_size × accumulate_steps.",
+        "--accumulate_steps",
+        type=int,
+        default=4,
+        help="Number of steps to accumulate gradients. Effective batch size = batch_size * accumulate_steps.",
     )
     p.add_argument("--iterations", type=int, default=200_000)
     p.add_argument("--lr", type=float, default=1e-5)
-    p.add_argument("--lr_step", type=int, default=50_000)       # §7: step_size=50000
+    p.add_argument("--lr_step", type=int, default=50_000)  # §7: step_size=50000
     p.add_argument("--distance_threshold", type=float, default=0.5)  # §7: d=0.5
     p.add_argument("--num_workers", type=int, default=4)
-    p.add_argument(
-        "--resume", action="store_true",
-        help="Resume training from checkpoints/rano/training_state.pt",
-    )
     args = p.parse_args()
     if args.librispeech_root and not args.libritts_root:
         args.libritts_root = args.librispeech_root
