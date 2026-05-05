@@ -1,5 +1,3 @@
-"""Rano: full speaker anonymization model integrating ACG, Anonymizer, SpeakerEncoder."""
-
 from __future__ import annotations
 
 import torch
@@ -26,8 +24,8 @@ class Rano(nn.Module):
         self,
         mel_channels: int = 80,
         embed_dim: int = 256,
-        num_cinn_blocks: int = 12,   # §2.2: N_inn = 12
-        num_acg_blocks: int = 8,     # §2.1: N_acg = 8
+        num_cinn_blocks: int = 12,  # §2.2: N_inn = 12
+        num_acg_blocks: int = 8,  # §2.1: N_acg = 8
         lambda1: float = 1.0,
         lambda2: float = 5.0,
         margin: float = 0.3,
@@ -55,12 +53,30 @@ class Rano(nn.Module):
     def training_step(
         self,
         x: torch.Tensor,
-        distance_threshold: float = 0.5,   # §7: d = 0.5 (L2)
+        distance_threshold: float = 0.5,  # §7: d = 0.5 (L2)
+        return_distances: bool = False,  # Return distance stats for monitoring
     ) -> dict[str, torch.Tensor]:
         """
-        Algorithm 1 in paper: generate key, anonymize, compute Lcons + Ltri.
-        x: (B, 80, T) mel-spectrogram batch.
-        Returns loss dict with keys: total, consistency, triplet.
+        Algorithm 1 in paper: generate key, anonymize, compute Lcons + Ltri (Eq. 7).
+
+        Implements Algorithm 1 from paper:
+            Step 1: Extract speaker embedding s = ASV(x)  [frozen ASV]
+            Step 2-4: Sample key z until ||s - c|| ≥ d, where c = ACG(z)
+            Step 5: Anonymize: xa = cINN(x, c)
+            Step 6: Consistency: x_hat = cINN(x, s)  [SII condition]
+            Step 7-8: Compute L_cons and L_tri, aggregate as L_total
+
+        Args:
+            x: (B, 80, T) mel-spectrogram batch
+            distance_threshold: Paper §7 threshold d = 0.5 (L2 distance)
+            return_distances: If True, include distance stats in returned dict
+
+        Returns:
+            Dict with keys: 'total', 'consistency', 'triplet', [and 'distances' if requested]
+
+        **CRITICAL CONSTRAINT** (Algorithm 1 line 2-4):
+            The returned conditioning MUST satisfy ||s - c|| ≥ distance_threshold.
+            If not, training violates the paper's specification.
         """
         # Step 2: extract speaker embedding (frozen ASV — §8.1)
         with torch.no_grad():
@@ -83,20 +99,70 @@ class Rano(nn.Module):
         anchor_emb = self.asv(xa)
 
         # Steps 10-11: L_tri + L_total
-        return self.loss_fn(x, x_hat, anchor_emb, cond, s)
+        losses = self.loss_fn(x, x_hat, anchor_emb, cond, s)
+
+        # Optional: Track distance statistics for debugging
+        if return_distances:
+            with torch.no_grad():
+                dist = torch.norm(s - cond, dim=-1, p=2).mean()
+                losses["distance"] = dist
+
+        return losses
 
     def _sample_far_key(self, s: torch.Tensor, d: float) -> torch.Tensor:
-        """Sample anonymous embedding with L2 distance > d from real embedding (§3.1 step 5)."""
+        """Sample anonymous embedding with L2 distance > d from real embedding.
+
+        Paper Algorithm 1, line 2-4 (§3.1 step 5):
+            "Sample key z from 𝒩(0,I) until ||s − c|| ≥ d (where c = ψ(z))"
+
+        Args:
+            s: Speaker embeddings (B, 256)
+            d: Distance threshold (default 0.5 in §7)
+
+        Returns:
+            cond: Anonymous conditioning (B, 256) with ||s - cond|| ≥ d
+
+        **CRITICAL**: If this returns cond with dist < d, training violates Algorithm 1.
+        Fallback should never be used in production training.
+        """
         device = s.device
-        for _ in range(50):  # max retries
+        max_retries = 200  # Increased from 50 for better convergence
+        best_cond = None
+        best_dist = 0.0
+
+        for attempt in range(max_retries):
             key = torch.randn_like(s)
             with torch.no_grad():
                 cond = self.acg.generate(key)
-            # Paper §7: threshold d=0.5 is L2 distance
-            dist = torch.norm(s - cond, dim=-1).mean()
+            # Paper §7: threshold d=0.5 is L2 distance (Euclidean norm)
+            dist = torch.norm(s - cond, dim=-1, p=2).mean()
+
+            # Track best attempt (for fallback)
+            if dist.item() > best_dist:
+                best_dist = dist.item()
+                best_cond = cond
+
+            # Success: found conditioning with sufficient distance
             if dist.item() > d:
                 return cond
-        return cond  # fallback: use last sample
+
+        # FALLBACK: Use best attempt found
+        # WARNING: This means Algorithm 1 constraint is NOT satisfied!
+        if best_dist < d * 0.95:  # Very low distance
+            import warnings
+
+            warnings.warn(
+                f"[ALGORITHM 1 VIOLATION] Key sampling failed to meet distance threshold.\n"
+                f"  Expected: ||s - c|| > {d:.4f}\n"
+                f"  Got: ||s - c|| = {best_dist:.4f}\n"
+                f"  This violates Paper Algorithm 1 and may harm anonymization quality.\n"
+                f"  Possible causes:\n"
+                f"    1. ACG not fully converged (increase Stage 1 iterations)\n"
+                f"    2. ACG degenerate output distribution (check embedding norm)\n"
+                f"    3. Distance threshold too high (reduce d parameter)",
+                RuntimeWarning,
+            )
+        return best_cond
 
     # ------------------------------------------------------------------
     # Inference

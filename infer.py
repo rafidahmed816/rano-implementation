@@ -52,7 +52,8 @@ def anonymize_dir(args):
 
             out_path = out_dir / path.relative_to(args.input).with_suffix(".wav")
             out_path.parent.mkdir(parents=True, exist_ok=True)
-            anon_wav = processor.mel_to_wav_grifflim(xa.cpu())
+            # Use HiFi-GAN vocoder (§IV-A: "We utilize Hifi-GAN [39] as the vocoder")
+            anon_wav = processor.mel_to_wav(xa.cpu())
             torchaudio.save(str(out_path), anon_wav, processor.sample_rate)
 
             key_store[spk] = speaker_keys[spk].cpu().tolist()
@@ -92,9 +93,33 @@ def restore_dir(args):
 
             xr = model.restore(mel, key)
 
+            # Debug: Check mel-spectrogram statistics before vocoding
+            print(
+                f"[{spk}] Restored mel: min={xr.min():.6f}, max={xr.max():.6f}, "
+                f"mean={xr.mean():.6f}, std={xr.std():.6f}"
+            )
+            print(
+                f"  Original mel:  min={mel.min():.6f}, max={mel.max():.6f}, "
+                f"mean={mel.mean():.6f}, std={mel.std():.6f}"
+            )
+            has_nan = torch.isnan(xr).any()
+            has_inf = torch.isinf(xr).any()
+            print(f"  Has NaN: {has_nan}, Has Inf: {has_inf}")
+
+            if has_nan or has_inf:
+                print(f"  [ERROR] Numerical issue detected! Skipping vocoding for {path}")
+                continue
+
             out_path = out_dir / path.relative_to(args.input)
             out_path.parent.mkdir(parents=True, exist_ok=True)
-            restored_wav = processor.mel_to_wav_grifflim(xr.cpu())
+            # Use HiFi-GAN vocoder (§IV-A: "We utilize Hifi-GAN [39] as the vocoder")
+            restored_wav = processor.mel_to_wav(xr.cpu())
+
+            # Check vocoded waveform
+            print(
+                f"  Vocoded wav: min={restored_wav.min():.6f}, max={restored_wav.max():.6f}, mean={restored_wav.mean():.6f}"
+            )
+
             torchaudio.save(str(out_path), restored_wav, processor.sample_rate)
 
 
