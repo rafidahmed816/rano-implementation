@@ -74,14 +74,24 @@ class ECAPATDNNEncoder(nn.Module):
 
     def __init__(self, device: str = "cpu"):
         super().__init__()
+        from huggingface_hub import snapshot_download
         from speechbrain.inference.speaker import EncoderClassifier
 
+        savedir = "pretrained_models/spkrec-ecapa-voxceleb"
+        snapshot_download(
+            "speechbrain/spkrec-ecapa-voxceleb",
+            local_dir=savedir,
+            local_dir_use_symlinks=False,
+        )
+        # SpeechBrain needs "cuda:0" not "cuda"
+        if device.startswith("cuda") and ":" not in device:
+            device = "cuda:0"
         self.model = EncoderClassifier.from_hparams(
-            source="speechbrain/spkrec-ecapa-voxceleb",
+            source=savedir,
+            savedir=savedir,
             run_opts={"device": device},
         )
         self.eval()
-        # Freeze all parameters
         for p in self.parameters():
             p.requires_grad_(False)
 
