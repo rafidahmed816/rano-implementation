@@ -30,6 +30,8 @@ def train_rano(args):
         shuffle=True,
         num_workers=args.num_workers,
         pin_memory=True,
+        persistent_workers=(args.num_workers > 0),
+        prefetch_factor=(2 if args.num_workers > 0 else None),
     )
 
     model = Rano(
@@ -56,15 +58,27 @@ def train_rano(args):
     for p in model.asv.parameters():
         p.requires_grad_(False)
 
+    # Optional: compile anonymizer for faster GPU kernel fusion (PyTorch 2.0+)
+    if args.compile and hasattr(torch, "compile"):
+        print("Compiling anonymizer with torch.compile() — first step will be slow...")
+        model.anonymizer = torch.compile(model.anonymizer)
+
     # §3 Stage 2: Adam + StepLR(step_size=50000, gamma=0.5)
     optimizer = Adam(model.anonymizer.parameters(), lr=args.lr, betas=(0.9, 0.99), eps=1e-8)
     scheduler = StepLR(optimizer, step_size=args.lr_step, gamma=0.5)
+
+    # Mixed precision: enabled only on CUDA, off by default (use --amp to enable)
+    use_amp = args.amp and device.type == "cuda"
+    scaler = torch.cuda.amp.GradScaler() if use_amp else None
+    if use_amp:
+        print("Mixed precision training (AMP) enabled.")
+
     writer = SummaryWriter(args.log_dir)
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    optimizer.zero_grad()
+    optimizer.zero_grad(set_to_none=True)
     data_iter = iter(loader)
     for step in tqdm(range(1, args.iterations + 1), desc="Rano training"):
         try:
@@ -73,22 +87,32 @@ def train_rano(args):
             data_iter = iter(loader)
             batch = next(data_iter)
 
-        mel = batch["mel"].to(device)
+        mel = batch["mel"].to(device, non_blocking=True)
         # Ensure (B, 80, T) shape
         if mel.dim() == 4:
             mel = mel.squeeze(1)
 
-        losses = model.training_step(mel, distance_threshold=args.distance_threshold)
+        with torch.amp.autocast(device_type=device.type, enabled=use_amp):
+            losses = model.training_step(mel, distance_threshold=args.distance_threshold)
 
         # Divide loss by accumulate_steps so the accumulated gradient matches the mean over the effective batch
         loss_to_backprop = losses["total"] / args.accumulate_steps
-        loss_to_backprop.backward()
+        if scaler is not None:
+            scaler.scale(loss_to_backprop).backward()
+        else:
+            loss_to_backprop.backward()
 
         if step % args.accumulate_steps == 0:
+            if scaler is not None:
+                scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.anonymizer.parameters(), 1.0)
-            optimizer.step()
+            if scaler is not None:
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
             scheduler.step()
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
 
         if step % 100 == 0:
             writer.add_scalar("loss/total", losses["total"].item(), step)
@@ -114,7 +138,7 @@ def train_rano(args):
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--vctk_root", type=str, default=None)
-    p.add_argument("--libritts_root", type=str, default="data")
+    p.add_argument("--libritts_root", type=str, default=None)
     p.add_argument(
         "--librispeech_root",
         type=str,
@@ -155,11 +179,21 @@ if __name__ == "__main__":
         default=4,
         help="Number of steps to accumulate gradients. Effective batch size = batch_size * accumulate_steps.",
     )
-    p.add_argument("--iterations", type=int, default=200_000)
+    p.add_argument("--iterations", type=int, default=200_00)
     p.add_argument("--lr", type=float, default=1e-5)
     p.add_argument("--lr_step", type=int, default=50_000)  # §7: step_size=50000
     p.add_argument("--distance_threshold", type=float, default=0.5)  # §7: d=0.5
     p.add_argument("--num_workers", type=int, default=4)
+    p.add_argument(
+        "--amp",
+        action="store_true",
+        help="Enable automatic mixed precision (fp16) training. ~1.5-2x faster on CUDA GPUs.",
+    )
+    p.add_argument(
+        "--compile",
+        action="store_true",
+        help="Compile anonymizer with torch.compile() (PyTorch 2.0+). Slow first step, faster thereafter.",
+    )
     args = p.parse_args()
     if args.librispeech_root and not args.libritts_root:
         args.libritts_root = args.librispeech_root

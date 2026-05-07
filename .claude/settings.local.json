@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(git -C D:/thesis stash)",
+      "PowerShell(git -C D:/thesis pull)",
+      "PowerShell(git -C D:/thesis stash pop)",
+      "PowerShell(ls d:\\\\thesis\\\\output -Recurse | Where-Object { -not $_.PSIsContainer } | Select-Object FullName, Length)"
+    ]
+  }
+}

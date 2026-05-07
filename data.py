@@ -19,6 +19,7 @@ from typing import Any
 
 import torch
 import torchaudio
+import soundfile as sf
 from torch.utils.data import Dataset, ConcatDataset
 
 from audio import MelProcessor
@@ -183,7 +184,12 @@ class VCTKDataset(Dataset):
         for _ in range(self.max_decode_retries):
             path = self.files[current_idx]
             try:
-                wav, sr = torchaudio.load(path)
+                wav_np, sr = sf.read(path)
+                wav = torch.from_numpy(wav_np).float()
+                if wav.ndim == 1:
+                    wav = wav.unsqueeze(0)
+                else:
+                    wav = wav.t()
                 wav = self.processor.resample(wav.mean(0), sr)  # mono
                 mel = self.processor.wav_to_mel(wav)  # (1, F, T)
                 mel = self._pad_or_trim(mel.squeeze(0))  # (F, T)
@@ -304,7 +310,12 @@ class LibriSpeechDataset(Dataset):
             sample = self.samples[current_idx]
             path = Path(sample["path"])
             try:
-                wav, sr = torchaudio.load(path)
+                wav_np, sr = sf.read(path)
+                wav = torch.from_numpy(wav_np).float()
+                if wav.ndim == 1:
+                    wav = wav.unsqueeze(0)
+                else:
+                    wav = wav.t()
                 wav = self.processor.resample(wav.mean(0), sr)
                 mel = self.processor.wav_to_mel(wav).squeeze(0)  # (F, T)
                 mel = self._pad_or_trim(mel)
