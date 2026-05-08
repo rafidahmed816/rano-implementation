@@ -27,19 +27,19 @@ class HiFiGANVocoder:
         self.hifigan_type = None
 
         if self._try_speechbrain_hifigan():
-            print(f"[✓] HiFi-GAN loaded from SpeechBrain (tts-hifigan-ljspeech)")
+            print(f"[OK] HiFi-GAN loaded from SpeechBrain (tts-hifigan-ljspeech)")
             return
 
         if self._try_transformers_hifigan():
-            print(f"[✓] HiFi-GAN loaded from transformers (SpeechT5HifiGan)")
+            print(f"[OK] HiFi-GAN loaded from transformers (SpeechT5HifiGan)")
             return
 
         if fallback_to_griffin_lim:
-            print(f"[⚠] HiFi-GAN unavailable. Will use Griffin-Lim vocoding.")
+            print(f"[WARN] HiFi-GAN unavailable. Will use Griffin-Lim vocoding.")
             self.use_grifflim_fallback = True
         else:
             raise RuntimeError(
-                "[✗] HiFi-GAN vocoder failed to load and Griffin-Lim fallback disabled.\n"
+                "[ERROR] HiFi-GAN vocoder failed to load and Griffin-Lim fallback disabled.\n"
                 "    Install: pip install speechbrain transformers\n"
                 "    Or set fallback_to_griffin_lim=True"
             )
@@ -109,7 +109,7 @@ class HiFiGANVocoder:
 
             return wav.cpu()
         except Exception as e:
-            print(f"[✗] HiFi-GAN forward pass failed: {e}")
+            print(f"[ERROR] HiFi-GAN forward pass failed: {e}")
             print(f"    Mel shape: {mel.shape}, type: {self.hifigan_type}")
             self.use_grifflim_fallback = True
             return torch.zeros(mel.shape[0], 1, mel.shape[-1] * 256)
