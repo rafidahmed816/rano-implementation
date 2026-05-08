@@ -36,7 +36,7 @@ pip-log.txt
 pip-delete-this-directory.txt
 
 # Unit test / coverage reports
-output/
+htmlcov/
 .tox/
 .nox/
 .coverage
@@ -160,3 +160,8 @@ Rano_Restorable_Speaker_Anonymization_via_Conditional_Invertible_Neural_Network.
 *Rano_Restorable_Speaker_Anonymization_via_Conditional_Invertible_Neural_Network.pdf
 /Rano_Restorable_Speaker_Anonymization_via_Conditional_Invertible_Neural_Network.pdf
 
+#output files
+anon/
+restored/
+.anon_70968
+output/
