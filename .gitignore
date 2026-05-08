@@ -47,7 +47,7 @@ coverage.xml
 *.cover
 .hypothesis/
 .pytest_cache/
-
+output/
 # Translations
 *.mo
 *.pot
@@ -160,8 +160,3 @@ Rano_Restorable_Speaker_Anonymization_via_Conditional_Invertible_Neural_Network.
 *Rano_Restorable_Speaker_Anonymization_via_Conditional_Invertible_Neural_Network.pdf
 /Rano_Restorable_Speaker_Anonymization_via_Conditional_Invertible_Neural_Network.pdf
 
-#output files
-anon/
-restored/
-.anon_70968
-output/
