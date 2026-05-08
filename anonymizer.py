@@ -28,10 +28,11 @@ class Anonymizer(nn.Module):
         log_det: (B,) — sum of log|J| across all cINN blocks.
         """
         h = x
-        log_det_total = torch.zeros(x.shape[0], device=x.device)
+        # Accumulate log_det in float32 to prevent fp16 overflow across 12 blocks
+        log_det_total = torch.zeros(x.shape[0], device=x.device, dtype=torch.float32)
         for block, perm in zip(self.blocks, self.perms):
             h, ld = block(h, cond)
-            log_det_total = log_det_total + ld
+            log_det_total = log_det_total + ld.float()
             h = perm(h)
         return h, log_det_total
 

@@ -30,12 +30,13 @@ class Rano(nn.Module):
         lambda2: float = 5.0,
         margin: float = 0.3,
         acg_tau: float = 0.5,
+        lambda_logdet: float = 0.01,
     ):
         super().__init__()
         self.acg = AnonymizationConditionGenerator(embed_dim, num_acg_blocks)
         self.anonymizer = Anonymizer(mel_channels, embed_dim, num_cinn_blocks)
         self.asv = AdaINVCSpeakerEncoder(mel_channels, embed_dim)
-        self.loss_fn = RanoLoss(lambda1, lambda2, margin)
+        self.loss_fn = RanoLoss(lambda1, lambda2, margin, lambda_logdet)
         self.acg_tau = acg_tau
 
     # ------------------------------------------------------------------
@@ -90,8 +91,9 @@ class Rano(nn.Module):
         # once instead of twice — ~2x throughput for the most expensive op.
         x2 = torch.cat([x, x], dim=0)       # (2B, 80, T)
         cond2 = torch.cat([cond, s], dim=0)  # (2B, 256)
-        out2, _ = self.anonymizer(x2, cond2) # (2B, 80, T)
+        out2, log_det2 = self.anonymizer(x2, cond2)  # (2B, 80, T), (2B,)
         xa, x_hat = out2.chunk(2, dim=0)     # each (B, 80, T)
+        log_det_anon, _ = log_det2.chunk(2, dim=0)  # log_det for anonymization pass
 
         # Step 8: L_cons = MSE(x, x_hat)  (Eq. 5)
         # Step 9: emb_ano = ASV(xa) — speaker embedding of anonymized speech
@@ -100,8 +102,8 @@ class Rano(nn.Module):
         # the ASV computation graph back into xa and then into the anonymizer.
         anchor_emb = self.asv(xa)
 
-        # Steps 10-11: L_tri + L_total
-        losses = self.loss_fn(x, x_hat, anchor_emb, cond, s)
+        # Steps 10-11: L_tri + L_total (now also includes log_det regularization)
+        losses = self.loss_fn(x, x_hat, anchor_emb, cond, s, log_det_anon)
 
         # Optional: Track distance statistics for debugging
         if return_distances:

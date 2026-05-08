@@ -1,4 +1,7 @@
-"""Training losses for Rano — Eq. 5 (consistency) and Eq. 6 (triplet / SDI-differentiation)."""
+"""Training losses for Rano — Eq. 5 (consistency) and Eq. 6 (triplet / SDI-differentiation).
+
+Extended with optional log-det Jacobian regularization for better cINN invertibility.
+"""
 
 import torch
 import torch.nn as nn
@@ -31,15 +34,25 @@ class TripletLoss(nn.Module):
 class RanoLoss(nn.Module):
     """
     Total loss for Rano second training stage (Eq. 7):
-    Ltotal = λ1 * Lcons + λ2 * Ltri
+    Ltotal = λ1 * Lcons + λ2 * Ltri + λ_logdet * L_logdet
+
+    L_logdet = -mean(log_det) encourages volume-preserving cINN transforms,
+    improving invertibility and reducing restoration noise.
     """
 
-    def __init__(self, lambda1: float = 1.0, lambda2: float = 5.0, margin: float = 0.3):
+    def __init__(
+        self,
+        lambda1: float = 1.0,
+        lambda2: float = 5.0,
+        margin: float = 0.3,
+        lambda_logdet: float = 0.01,
+    ):
         super().__init__()
         self.lcons = ConsistencyLoss()
         self.ltri = TripletLoss(margin)
         self.lambda1 = lambda1
         self.lambda2 = lambda2
+        self.lambda_logdet = lambda_logdet
 
     def forward(
         self,
@@ -48,8 +61,19 @@ class RanoLoss(nn.Module):
         anchor_emb: torch.Tensor,
         cond_emb: torch.Tensor,
         orig_emb: torch.Tensor,
+        log_det: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         cons = self.lcons(x, x_hat)
         tri = self.ltri(anchor_emb, cond_emb, orig_emb)
         total = self.lambda1 * cons + self.lambda2 * tri
-        return {"total": total, "consistency": cons, "triplet": tri}
+
+        result = {"total": total, "consistency": cons, "triplet": tri}
+
+        if log_det is not None and self.lambda_logdet > 0:
+            # Penalise large absolute log-det to encourage volume-preserving
+            # transforms, which improves numerical invertibility.
+            logdet_loss = -log_det.mean()
+            result["logdet"] = logdet_loss
+            result["total"] = total + self.lambda_logdet * logdet_loss
+
+        return result

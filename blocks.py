@@ -153,7 +153,9 @@ class CINNBlock(nn.Module):
         u_out = u * torch.exp(log_s1) + self.phi(v, cond)
         log_s2 = self.rho(u_out, cond).clamp(-_EXP_CLAMP, _EXP_CLAMP)
         v_out = v * torch.exp(log_s2) + self.eta(u_out, cond)
-        log_det = log_s1.sum(dim=[1, 2]) + log_s2.sum(dim=[1, 2])  # (B,)
+        # Cast to float32 before summing to prevent fp16 overflow
+        # (40 channels × 256 time steps × 12 blocks easily exceeds fp16 max of 65504)
+        log_det = log_s1.float().sum(dim=[1, 2]) + log_s2.float().sum(dim=[1, 2])  # (B,)
         return torch.cat([u_out, v_out], dim=1), log_det
 
     def inverse(self, y: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
