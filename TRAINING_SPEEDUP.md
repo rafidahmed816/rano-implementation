@@ -174,3 +174,7 @@ python train_stage2.py --amp --libritts_root data/LibriSpeech ...
 # Full speed (AMP + compiled, PyTorch 2.0+, first step slow)
 python train_stage2.py --amp --compile --libritts_root data/LibriSpeech ...
 ```
+Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process
+d:\Thesis_2.0\rano-implementation\venv\Scripts\Activate.ps1
+
+python train_stage2.py --librispeech_root "D:\Thesis_2.0\rano-implementation\data\LibriSpeech" --librispeech_subsets train-clean-100 --acg_checkpoint checkpoints/acg/acg_best.pt --output_dir checkpoints/rano --log_dir logs/rano --iterations 200000 --batch_size 4 --accumulate_steps 4 --lr 1e-5 --val_every 500 --amp
