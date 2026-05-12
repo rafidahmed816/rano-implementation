@@ -67,7 +67,7 @@ def _load_training_state(
 
 
 @torch.no_grad()
-def _validate(model: Rano, val_loader, device, use_amp, num_batches=10):
+def _validate(model: Rano, val_loader, device, use_amp, amp_dtype=torch.float32, num_batches=10):
     """Run validation and return average losses."""
     model.anonymizer.eval()
     totals = {"total": 0.0, "consistency": 0.0, "triplet": 0.0}
@@ -84,7 +84,7 @@ def _validate(model: Rano, val_loader, device, use_amp, num_batches=10):
         # Temporarily enable grad for the validation forward pass
         # because training_step needs gradients internally for ASV→anonymizer flow.
         # We use a simpler validation: just compute consistency loss.
-        with torch.amp.autocast(device_type=device.type, enabled=use_amp):
+        with torch.amp.autocast(device_type=device.type, enabled=use_amp, dtype=amp_dtype):
             x = mel
             with torch.no_grad():
                 s = model.asv(x)
@@ -102,6 +102,13 @@ def _validate(model: Rano, val_loader, device, use_amp, num_batches=10):
 
 def train_rano(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # --- CUDA performance flags (safe, no numerical impact) ---
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True   # auto-tune conv algorithms
+        torch.backends.cuda.matmul.allow_tf32 = True  # TF32 for matmuls
+        torch.backends.cudnn.allow_tf32 = True   # TF32 for convolutions
+
     processor = MelProcessor()
 
     # --- Build train dataset ---
@@ -175,11 +182,19 @@ def train_rano(args):
     optimizer = Adam(model.anonymizer.parameters(), lr=args.lr, betas=(0.9, 0.99), eps=1e-8)
     scheduler = StepLR(optimizer, step_size=args.lr_step, gamma=0.5)
 
-    # Mixed precision: enabled by default on CUDA
+    # Mixed precision: BF16 on Blackwell/Ampere+, FP16 fallback
     use_amp = args.amp and device.type == "cuda"
-    scaler = torch.amp.GradScaler() if use_amp else None
-    if use_amp:
-        print("Mixed precision training (AMP) enabled.")
+    if use_amp and torch.cuda.is_bf16_supported():
+        amp_dtype = torch.bfloat16
+        scaler = None  # BF16 has sufficient dynamic range, no scaler needed
+        print("Mixed precision training (AMP) enabled — BF16 (native Blackwell).")
+    elif use_amp:
+        amp_dtype = torch.float16
+        scaler = torch.amp.GradScaler()
+        print("Mixed precision training (AMP) enabled — FP16 + GradScaler.")
+    else:
+        amp_dtype = torch.float32
+        scaler = None
 
     writer = SummaryWriter(args.log_dir)
 
@@ -216,7 +231,7 @@ def train_rano(args):
     print(f"\n{'='*60}")
     print(f"Training config:")
     print(f"  Device:           {device}")
-    print(f"  AMP:              {use_amp}")
+    print(f"  AMP:              {use_amp} ({amp_dtype})")
     print(f"  Batch size:       {args.batch_size} (physical) x {args.accumulate_steps} (accum) = {args.batch_size * args.accumulate_steps} (effective)")
     print(f"  Steps:            {start_step} -> {args.iterations}")
     print(f"  LR:               {args.lr} (StepLR every {args.lr_step})")
@@ -238,8 +253,17 @@ def train_rano(args):
         if mel.dim() == 4:
             mel = mel.squeeze(1)
 
-        with torch.amp.autocast(device_type=device.type, enabled=use_amp):
+        with torch.amp.autocast(device_type=device.type, enabled=use_amp, dtype=amp_dtype):
             losses = model.training_step(mel, distance_threshold=args.distance_threshold)
+
+        # --- NaN guard: skip step if loss is NaN to prevent weight corruption ---
+        if torch.isnan(losses["total"]) or torch.isinf(losses["total"]):
+            tqdm.write(f"  [WARN] step={step}  NaN/Inf loss detected — skipping optimizer step")
+            optimizer.zero_grad(set_to_none=True)
+            # Reset scaler state to avoid stale scaled gradients
+            if scaler is not None:
+                scaler.update()
+            continue
 
         # Divide loss by accumulate_steps so the accumulated gradient matches the mean over the effective batch
         loss_to_backprop = losses["total"] / args.accumulate_steps
@@ -257,8 +281,8 @@ def train_rano(args):
                 scaler.update()
             else:
                 optimizer.step()
-            scheduler.step()
             optimizer.zero_grad(set_to_none=True)
+            scheduler.step()
 
         step_time = time.time() - step_start
         step_times.append(step_time)
@@ -294,7 +318,7 @@ def train_rano(args):
 
         # --- Validation ---
         if step % args.val_every == 0:
-            val_losses = _validate(model, val_loader, device, use_amp)
+            val_losses = _validate(model, val_loader, device, use_amp, amp_dtype)
             writer.add_scalar("val/consistency", val_losses["consistency"], step)
             tqdm.write(
                 f"  [VAL] step={step}  consistency={val_losses['consistency']:.6f}"
@@ -366,18 +390,18 @@ if __name__ == "__main__":
     p.add_argument("--lambda_logdet", type=float, default=0.01,
                     help="Weight for log-det Jacobian regularization (0 to disable).")
     p.add_argument("--margin", type=float, default=0.3)
-    p.add_argument("--batch_size", type=int, default=4, help="Physical batch size per step.")
+    p.add_argument("--batch_size", type=int, default=16, help="Physical batch size per step. RTX 5070 Ti (16GB) fits bs=48 with AMP.")
     p.add_argument(
         "--accumulate_steps",
         type=int,
-        default=4,
+        default=1,
         help="Number of steps to accumulate gradients. Effective batch size = batch_size * accumulate_steps.",
     )
     p.add_argument("--iterations", type=int, default=200_000)  # §7: 200k iterations
     p.add_argument("--lr", type=float, default=1e-5)
     p.add_argument("--lr_step", type=int, default=50_000)  # §7: step_size=50000
     p.add_argument("--distance_threshold", type=float, default=0.5)  # §7: d=0.5
-    p.add_argument("--num_workers", type=int, default=4)
+    p.add_argument("--num_workers", type=int, default=8)
     p.add_argument("--val_every", type=int, default=500,
                     help="Run validation every N steps (also saves best model if improved).")
     p.add_argument(

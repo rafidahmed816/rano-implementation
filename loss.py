@@ -72,7 +72,13 @@ class RanoLoss(nn.Module):
         if log_det is not None and self.lambda_logdet > 0:
             # Penalise large absolute log-det to encourage volume-preserving
             # transforms, which improves numerical invertibility.
-            logdet_loss = -log_det.mean()
+            # NOTE: log_det is summed over [channels, time] × all cINN blocks,
+            # so we must normalize per-element to keep it on a sane scale.
+            # Without this, values reach -20k+ and explode gradients → NaN.
+            logdet_per_elem = log_det / max(log_det.numel(), 1)
+            logdet_loss = -logdet_per_elem.mean()
+            # Safety clamp to prevent any residual instability
+            logdet_loss = logdet_loss.clamp(-100.0, 100.0)
             result["logdet"] = logdet_loss
             result["total"] = total + self.lambda_logdet * logdet_loss
 
