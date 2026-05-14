@@ -4,9 +4,14 @@ Evaluation ASV: ECAPA-TDNN from SpeechBrain (separate, never used in training).
 """
 
 from __future__ import annotations
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+# SpeechBrain tries to create symlinks on Windows which requires elevated privileges.
+# Force copy strategy instead (only affects ECAPA-TDNN evaluation encoder).
+os.environ.setdefault("SPEECHBRAIN_LOCAL_STRATEGY", "copy")
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +81,7 @@ class ECAPATDNNEncoder(nn.Module):
         super().__init__()
         from huggingface_hub import snapshot_download
         from speechbrain.inference.speaker import EncoderClassifier
+        from speechbrain.utils.fetching import LocalStrategy
 
         savedir = "pretrained_models/spkrec-ecapa-voxceleb"
         snapshot_download(
@@ -90,6 +96,7 @@ class ECAPATDNNEncoder(nn.Module):
             source=savedir,
             savedir=savedir,
             run_opts={"device": device},
+            local_strategy=LocalStrategy.COPY,
         )
         self.eval()
         for p in self.parameters():

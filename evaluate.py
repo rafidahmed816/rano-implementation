@@ -38,6 +38,12 @@ Usage:
 import argparse
 import json
 import time
+import librosa
+import numpy as np
+
+# Force librosa lazy_loader to evaluate before speechbrain is loaded
+_ = librosa.pyin(np.zeros(1000), fmin=50, fmax=200)
+
 from pathlib import Path
 from collections import defaultdict
 
@@ -45,6 +51,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import torchaudio
+import soundfile as sf
 from tqdm import tqdm
 
 from model import Rano
@@ -361,7 +368,12 @@ def evaluate(args):
             spk = path.parent.name
 
             # Load and preprocess audio
-            wav, sr = torchaudio.load(str(path))
+            wav_np, sr = sf.read(str(path))
+            wav = torch.from_numpy(wav_np).float()
+            if wav.ndim == 1:
+                wav = wav.unsqueeze(0)
+            else:
+                wav = wav.transpose(0, 1)
             wav = processor.resample(wav.mean(0), sr)  # mono, 22050 Hz
 
             mel = processor.wav_to_mel(wav).to(device)  # (1, 80, T_mel)
@@ -464,19 +476,19 @@ def evaluate(args):
     print(f"{'='*70}")
     print(f"  {'Metric':<20} {'Value':>12}  {'Direction':>10}  {'Paper Ref'}")
     print(f"  {'-'*65}")
-    print(f"  {'EER (%)':<20} {eer:>12.2f}  {'↑ better':>10}  §IV-B.1")
+    print(f"  {'EER (%)':<20} {eer:>12.2f}  {'^ better':>10}  Sec IV-B.1")
     if not np.isnan(wer):
-        print(f"  {'WER (%)':<20} {wer:>12.2f}  {'↓ better':>10}  §IV-B.1 (Whisper)")
+        print(f"  {'WER (%)':<20} {wer:>12.2f}  {'v better':>10}  Sec IV-B.1 (Whisper)")
     else:
-        print(f"  {'WER (%)':<20} {'N/A':>12}  {'↓ better':>10}  §IV-B.1 (skipped)")
-    print(f"  {'GVD (dB)':<20} {gvd:>12.2f}  {'≥0 ideal':>10}  §IV-B.1, [41]")
-    print(f"  {'ρf0':<20} {rho_f0:>12.3f}  {'↑ better':>10}  §IV-B.1")
+        print(f"  {'WER (%)':<20} {'N/A':>12}  {'v better':>10}  Sec IV-B.1 (skipped)")
+    print(f"  {'GVD (dB)':<20} {gvd:>12.2f}  {'>=0 ideal':>10}  Sec IV-B.1, [41]")
+    print(f"  {'rho_f0':<20} {rho_f0:>12.3f}  {'^ better':>10}  Sec IV-B.1")
 
     if args.eval_restoration:
         print(f"  {'-'*65}")
-        print(f"  {'Restoration Metrics — §IV-D (correct key)':}")
-        print(f"  {'Sim_spk (%)':<20} {mean_rest_sim:>12.2f}  {'↑ better':>10}  Table III")
-        print(f"  {'MCD (dB)':<20} {mean_rest_mcd:>12.2f}  {'↓ better':>10}  Table III")
+        print(f"  {'Restoration Metrics — Sec IV-D (correct key)':}")
+        print(f"  {'Sim_spk (%)':<20} {mean_rest_sim:>12.2f}  {'^ better':>10}  Table III")
+        print(f"  {'MCD (dB)':<20} {mean_rest_mcd:>12.2f}  {'v better':>10}  Table III")
 
     print(f"{'='*70}")
 

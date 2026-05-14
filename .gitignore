@@ -138,6 +138,11 @@ data
 # Model checkpoints (large files)
 checkpoints/
 checkpoints
+test_inferences/
+test_inferences
+pretrained_models/
+pretrained_models
+
 
 # Logs
 logs/

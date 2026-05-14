@@ -1,0 +1,22 @@
+{
+  "method": "Rano",
+  "num_speakers": 5,
+  "num_utterances": 15,
+  "elapsed_seconds": 168.6,
+  "metrics": {
+    "EER_pct": 26.67,
+    "WER_pct": 183.37,
+    "GVD_dB": -1.17,
+    "rho_f0": -0.036
+  },
+  "paper_reference": {
+    "EER_pct": 47.81,
+    "WER_pct": 11.91,
+    "GVD_dB": 0.39,
+    "rho_f0": 0.8
+  },
+  "restoration": {
+    "Sim_spk_pct": 17.77,
+    "MCD_dB": Infinity
+  }
+}
