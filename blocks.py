@@ -162,9 +162,12 @@ class CINNBlock(nn.Module):
         """Exact inverse of forward (Eq. 2)."""
         u_out, v_out = y.chunk(2, dim=1)
         log_s2 = self.rho(u_out, cond).clamp(-_EXP_CLAMP, _EXP_CLAMP)
-        v = (v_out - self.eta(u_out, cond)) / torch.exp(log_s2)
+        # Clamp exp output: prevent division by near-zero or overflow in fp16 backward
+        exp_s2 = torch.exp(log_s2).clamp(min=1e-3, max=1e3)
+        v = (v_out - self.eta(u_out, cond)) / exp_s2
         log_s1 = self.psi(v, cond).clamp(-_EXP_CLAMP, _EXP_CLAMP)
-        u = (u_out - self.phi(v, cond)) / torch.exp(log_s1)
+        exp_s1 = torch.exp(log_s1).clamp(min=1e-3, max=1e3)
+        u = (u_out - self.phi(v, cond)) / exp_s1
         return torch.cat([u, v], dim=1)
 
 
@@ -215,9 +218,11 @@ class INNBlock(nn.Module):
     def inverse(self, y: torch.Tensor) -> torch.Tensor:
         y1, y2 = y.chunk(2, dim=-1)
         s2 = self.s2(y2).clamp(-_EXP_CLAMP, _EXP_CLAMP)
+        exp_s2 = torch.exp(s2).clamp(min=1e-3, max=1e3)
         t2 = self.t2(y2)
-        x1 = (y1 - t2) / torch.exp(s2)
+        x1 = (y1 - t2) / exp_s2
         s1 = self.s1(x1).clamp(-_EXP_CLAMP, _EXP_CLAMP)
+        exp_s1 = torch.exp(s1).clamp(min=1e-3, max=1e3)
         t1 = self.t1(x1)
-        x2 = (y2 - t1) / torch.exp(s1)
+        x2 = (y2 - t1) / exp_s1
         return torch.cat([x1, x2], dim=-1)
