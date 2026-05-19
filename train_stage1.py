@@ -37,8 +37,13 @@ def train_acg(args):
 
     asv = AdaINVCSpeakerEncoder(embed_dim=args.embed_dim).to(device)
     asv_ckpt = Path(args.asv_checkpoint)
-    if asv_ckpt.exists():
-        asv.load_state_dict(torch.load(asv_ckpt, map_location=device))
+    if not asv_ckpt.exists():
+        raise FileNotFoundError(
+            f"ASV checkpoint not found: {asv_ckpt}\n"
+            "Train ASV first with: python train_asv.py\n"
+            "Or specify correct path: --asv_checkpoint <path>"
+        )
+    asv.load_state_dict(torch.load(asv_ckpt, map_location=device))
     asv.eval()
     for p in asv.parameters():
         p.requires_grad_(False)

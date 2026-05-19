@@ -161,15 +161,25 @@ def train_rano(args):
 
     # Load pre-trained ACG and freeze it (§3: freeze after Stage 1)
     acg_ckpt = Path(args.acg_checkpoint)
-    if acg_ckpt.exists():
-        model.acg.load_state_dict(torch.load(acg_ckpt, map_location=device))
+    if not acg_ckpt.exists():
+        raise FileNotFoundError(
+            f"ACG checkpoint not found: {acg_ckpt}\n"
+            "Train ACG first with: python train_stage1.py\n"
+            "Or specify correct path: --acg_checkpoint <path>"
+        )
+    model.acg.load_state_dict(torch.load(acg_ckpt, map_location=device))
     for p in model.acg.parameters():
         p.requires_grad_(False)
 
     # Load pre-trained ASV and freeze it (§8.1: never update ASV)
     asv_ckpt = Path(args.asv_checkpoint)
-    if asv_ckpt.exists():
-        model.asv.load_state_dict(torch.load(asv_ckpt, map_location=device))
+    if not asv_ckpt.exists():
+        raise FileNotFoundError(
+            f"ASV checkpoint not found: {asv_ckpt}\n"
+            "Train ASV first with: python train_asv.py\n"
+            "Or specify correct path: --asv_checkpoint <path>"
+        )
+    model.asv.load_state_dict(torch.load(asv_ckpt, map_location=device))
     for p in model.asv.parameters():
         p.requires_grad_(False)
 

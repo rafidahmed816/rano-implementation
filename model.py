@@ -103,7 +103,11 @@ class Rano(nn.Module):
         anchor_emb = self.asv(xa)
 
         # Steps 10-11: L_tri + L_total (now also includes log_det regularization)
-        losses = self.loss_fn(x, x_hat, anchor_emb, cond, s, log_det_anon)
+        # Compute actual element count for proper logdet normalization:
+        # each cINN block sums log_s over (mel_channels × T), across all blocks.
+        n_elements = x.shape[1] * x.shape[2] * len(self.anonymizer.blocks)
+        losses = self.loss_fn(x, x_hat, anchor_emb, cond, s, log_det_anon,
+                              n_elements=n_elements)
 
         # Optional: Track distance statistics for debugging
         if return_distances:
@@ -166,11 +170,26 @@ class Rano(nn.Module):
         Returns (anonymized_mel, cond) — store key for restoration.
         """
         cond = self.acg.generate(key)
-        xa, _ = self.anonymizer(x, cond)
-        return xa, cond
+        # Use fp64 for maximum numerical precision in cINN transforms.
+        # A100 handles fp64 natively; this eliminates floating-point error
+        # amplification across 12 sequential cINN blocks.
+        orig_dtype = next(self.anonymizer.parameters()).dtype
+        self.anonymizer.double()
+        xa, _ = self.anonymizer(x.double(), cond.double())
+        self.anonymizer.to(orig_dtype)
+        return xa.float(), cond
 
     @torch.no_grad()
     def restore(self, xa: torch.Tensor, key: torch.Tensor) -> torch.Tensor:
         """Restore anonymized mel → original mel using the correct key (lossless, §4.2)."""
         cond = self.acg.generate(key)
-        return self.anonymizer.inverse(xa, cond)
+        # Use fp64 for maximum numerical precision in inverse cINN.
+        # The inverse divides by exp(log_s) at each block — with fp32/fp16,
+        # errors compound multiplicatively across 12 blocks.
+        # fp64 gives ~15 decimal digits vs fp32's ~7, virtually eliminating
+        # numerical restoration error.
+        orig_dtype = next(self.anonymizer.parameters()).dtype
+        self.anonymizer.double()
+        xr = self.anonymizer.inverse(xa.double(), cond.double())
+        self.anonymizer.to(orig_dtype)
+        return xr.float()
