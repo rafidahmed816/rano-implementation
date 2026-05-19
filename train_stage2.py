@@ -390,7 +390,7 @@ if __name__ == "__main__":
     p.add_argument("--lambda_logdet", type=float, default=0.01,
                     help="Weight for log-det Jacobian regularization (0 to disable).")
     p.add_argument("--margin", type=float, default=0.3)
-    p.add_argument("--batch_size", type=int, default=16, help="Physical batch size per step. RTX 5070 Ti (16GB) fits bs=48 with AMP.")
+    p.add_argument("--batch_size", type=int, default=16, help="Physical batch size per step. A100 80GB fits bs=128 with AMP.")
     p.add_argument(
         "--accumulate_steps",
         type=int,
@@ -432,6 +432,8 @@ if __name__ == "__main__":
     if args.no_amp:
         args.amp = False
 
-    if args.librispeech_root and not args.libritts_root:
+    if args.librispeech_root:
         args.libritts_root = args.librispeech_root
+    if not args.libritts_root:
+        raise ValueError("Either --libritts_root or --librispeech_root must be provided.")
     train_rano(args)
