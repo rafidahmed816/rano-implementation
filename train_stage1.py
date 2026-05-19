@@ -97,7 +97,7 @@ def train_acg(args):
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--vctk_root", type=str, default=None)
-    p.add_argument("--libritts_root", type=str, default="data")
+    p.add_argument("--libritts_root", type=str, default=None)
     p.add_argument(
         "--librispeech_root",
         type=str,
@@ -130,6 +130,8 @@ if __name__ == "__main__":
     p.add_argument("--tau", type=float, default=0.5)
     p.add_argument("--num_workers", type=int, default=4)
     args = p.parse_args()
-    if args.librispeech_root and not args.libritts_root:
+    if args.librispeech_root:
         args.libritts_root = args.librispeech_root
+    if not args.libritts_root:
+        args.libritts_root = "data"
     train_acg(args)

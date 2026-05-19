@@ -13,7 +13,7 @@ Why is this needed?
 
 Usage:
   python train_asv.py
-      --librispeech_root D:/thesis/data/LibriSpeech
+      --librispeech_root data/LibriSpeech
       --output checkpoints/asv.pt
       --epochs 50 --batch_size 32 --amp
 """
@@ -269,7 +269,7 @@ def train_asv(args):
         f"\nYou can now run Stage 2 training with:\n"
         f"  python train_stage2.py\n"
         f"    --asv_checkpoint {output_path}\n"
-        f"    --librispeech_root D:/thesis/data/LibriSpeech\n"
+        f"    --librispeech_root data/LibriSpeech\n"
         f"    --librispeech_subsets train-clean-100\n"
         f"    --acg_checkpoint checkpoints/acg/acg_best.pt\n"
         f"    --output_dir checkpoints/rano\n"
