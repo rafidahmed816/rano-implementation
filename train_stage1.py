@@ -33,6 +33,9 @@ def train_acg(args):
         shuffle=True,
         num_workers=args.num_workers,
         pin_memory=True,
+        persistent_workers=(args.num_workers > 0),
+        prefetch_factor=2,
+        drop_last=True,
     )
 
     asv = AdaINVCSpeakerEncoder(embed_dim=args.embed_dim).to(device)
@@ -124,7 +127,7 @@ if __name__ == "__main__":
     p.add_argument("--output_dir", type=str, default="checkpoints/acg")
     p.add_argument("--embed_dim", type=int, default=256)
     p.add_argument("--num_acg_blocks", type=int, default=8)
-    p.add_argument("--batch_size", type=int, default=64)       # §7: batch=64
+    p.add_argument("--batch_size", type=int, default=64)       # Reduced from 512 for better throughput
     p.add_argument("--iterations", type=int, default=100_000)
     p.add_argument("--lr", type=float, default=1e-5)
     p.add_argument("--tau", type=float, default=0.5)

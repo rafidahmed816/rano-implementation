@@ -217,7 +217,7 @@ python train_stage1.py \
     --librispeech_subsets train-clean-360 \
     --asv_checkpoint checkpoints/asv.pt \
     --output_dir checkpoints/acg \
-    --batch_size 512 \
+    --batch_size 128 \
     --iterations 100000 \
     --num_workers 8
 ```
@@ -256,7 +256,7 @@ python train_stage2.py \
     --iterations 200000 \
     --lr 1e-5 \
     --val_every 500 \
-    --num_workers 8 \
+    --num_workers 16 \
     --amp \
     --compile
 ```
