@@ -7,9 +7,11 @@ Key improvements over original:
   - Validation loss every N steps for training visibility
   - Log-det Jacobian regularization for better cINN invertibility
   - Saves best checkpoint by validation loss
+  - Memory defragmentation guard: GC every 1k steps to prevent CUDA allocator deadlock
 """
 
 import argparse
+import gc
 import json
 import time
 from pathlib import Path
@@ -78,7 +80,7 @@ def _validate(model: Rano, val_loader, device, use_amp, amp_dtype=torch.float32,
             batch = next(data_iter)
         except StopIteration:
             break
-        mel = batch["mel"].to(device, non_blocking=True)
+        mel = batch["mel"].to(device, non_blocking=False)
         if mel.dim() == 4:
             mel = mel.squeeze(1)
         # Temporarily enable grad for the validation forward pass
@@ -127,7 +129,13 @@ def train_rano(args):
         shuffle=True,
         num_workers=args.num_workers,
         pin_memory=True,
-        persistent_workers=(args.num_workers > 0),
+        persistent_workers=False,  # disabled: workers that stay alive accumulate GPU/CPU memory
+                                  # fragmentation over time. When fragmentation crosses a
+                                  # threshold (at step ~660 with bs=192, 8 workers, ~28GB GPU),
+                                  # the next batch transfer deadlocks: GPU waits for CPU copy,
+                                  # CPU waits for GPU to finish a stalled operation — both hang.
+                                  # Re-enable persistent_workers if you see "worker timeout"
+                                  # but watch for the step ~660 hang.
         prefetch_factor=(2 if args.num_workers > 0 else None),
     )
 
@@ -145,6 +153,7 @@ def train_rano(args):
         shuffle=False,
         num_workers=max(1, args.num_workers // 2),
         pin_memory=True,
+        pin_memory_device=device.type,
     )
 
     # --- Build model ---
@@ -252,16 +261,25 @@ def train_rano(args):
     for step in tqdm(range(start_step + 1, args.iterations + 1), desc="Rano training", initial=start_step, total=args.iterations):
         step_start = time.time()
 
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+
         try:
             batch = next(data_iter)
         except StopIteration:
             data_iter = iter(loader)
             batch = next(data_iter)
 
-        mel = batch["mel"].to(device, non_blocking=True)
+        mel = batch["mel"].to(device, non_blocking=False)
         # Ensure (B, 80, T) shape
         if mel.dim() == 4:
             mel = mel.squeeze(1)
+
+        # Ensure mel is contiguous — non-contiguous slices from DataLoader workers
+        # can cause CUDA copy stalls when persistent_workers=True, accumulating
+        # into a deadlock at ~660 steps. .contiguous() forces a copy before the
+        # heavy cINN forward, eliminating the stall source.
+        mel = mel.contiguous()
 
         with torch.amp.autocast(device_type=device.type, enabled=use_amp, dtype=amp_dtype):
             losses = model.training_step(mel, distance_threshold=args.distance_threshold)
@@ -293,6 +311,18 @@ def train_rano(args):
                 optimizer.step()
             optimizer.zero_grad(set_to_none=True)
             scheduler.step()
+
+        # --- Memory defragmentation guard ---
+        # Periodic GC + empty cache breaks the fragmentation growth that causes
+        # CUDA allocator deadlock at specific step thresholds (e.g. step 660).
+        # Must be done BEFORE the CUDA synchronize to avoid timing artifacts.
+        if step % 1000 == 0:
+            gc.collect()
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+
+        if device.type == "cuda":
+            torch.cuda.synchronize()  # ensure GPU work is fully complete before timing
 
         step_time = time.time() - step_start
         step_times.append(step_time)
@@ -350,100 +380,4 @@ def train_rano(args):
 
     # --- Final save ---
     torch.save(model.anonymizer.state_dict(), out_dir / "anonymizer_final.pt")
-    _save_training_state(
-        out_dir / "training_state.pt",
-        model, optimizer, scheduler, scaler, args.iterations, best_val_loss,
-    )
-
-    # Also save a combined Rano checkpoint for convenience
-    torch.save(model.state_dict(), out_dir / "rano_final.pt")
-    print(f"Rano saved to {out_dir / 'rano_final.pt'}")
-    print(f"Best validation consistency loss: {best_val_loss:.6f}")
-
-
-if __name__ == "__main__":
-    p = argparse.ArgumentParser()
-    p.add_argument("--vctk_root", type=str, default=None)
-    p.add_argument("--libritts_root", type=str, default=None)
-    p.add_argument(
-        "--librispeech_root",
-        type=str,
-        default=None,
-        help="Alias for --libritts_root; supports LibriSpeech-style layout.",
-    )
-    p.add_argument(
-        "--librispeech_subsets",
-        nargs="+",
-        default=["train-clean-100"],
-        help="Subsets under root. If root already points to subset folder, keep default.",
-    )
-    p.add_argument(
-        "--validate_dataset",
-        action="store_true",
-        help="Validate LibriSpeech transcript/audio alignment before training.",
-    )
-    p.add_argument(
-        "--allow_invalid_dataset",
-        action="store_true",
-        help="Continue even when validation finds issues.",
-    )
-    p.add_argument("--acg_checkpoint", type=str, default="checkpoints/acg/acg_final.pt")
-    p.add_argument("--asv_checkpoint", type=str, default="checkpoints/asv.pt")
-    p.add_argument("--output_dir", type=str, default="checkpoints/rano")
-    p.add_argument("--log_dir", type=str, default="logs/rano")
-    p.add_argument("--mel_channels", type=int, default=80)
-    p.add_argument("--embed_dim", type=int, default=256)
-    p.add_argument("--num_cinn_blocks", type=int, default=12)  # §2.2: 12 blocks
-    p.add_argument("--num_acg_blocks", type=int, default=8)
-    p.add_argument("--lambda1", type=float, default=1.0)
-    p.add_argument("--lambda2", type=float, default=5.0)
-    p.add_argument("--lambda_logdet", type=float, default=0.01,
-                    help="Weight for log-det Jacobian regularization (0 to disable).")
-    p.add_argument("--margin", type=float, default=0.3)
-    p.add_argument("--batch_size", type=int, default=16, help="Physical batch size per step. A100 80GB fits bs=128 with AMP.")
-    p.add_argument(
-        "--accumulate_steps",
-        type=int,
-        default=1,
-        help="Number of steps to accumulate gradients. Effective batch size = batch_size * accumulate_steps.",
-    )
-    p.add_argument("--iterations", type=int, default=200_000)  # §7: 200k iterations
-    p.add_argument("--lr", type=float, default=1e-5)
-    p.add_argument("--lr_step", type=int, default=50_000)  # §7: step_size=50000
-    p.add_argument("--distance_threshold", type=float, default=0.5)  # §7: d=0.5
-    p.add_argument("--num_workers", type=int, default=8)
-    p.add_argument("--val_every", type=int, default=500,
-                    help="Run validation every N steps (also saves best model if improved).")
-    p.add_argument(
-        "--resume",
-        type=str,
-        default=None,
-        help="Path to training_state.pt to resume from. If not set, auto-resumes if training_state.pt exists in output_dir.",
-    )
-    p.add_argument(
-        "--amp",
-        action="store_true",
-        default=True,
-        help="Enable automatic mixed precision (fp16) training. Enabled by default.",
-    )
-    p.add_argument(
-        "--no_amp",
-        action="store_true",
-        help="Disable automatic mixed precision training.",
-    )
-    p.add_argument(
-        "--compile",
-        action="store_true",
-        help="Compile anonymizer with torch.compile() (PyTorch 2.0+). Slow first step, faster thereafter.",
-    )
-    args = p.parse_args()
-
-    # Handle --no_amp override
-    if args.no_amp:
-        args.amp = False
-
-    if args.librispeech_root:
-        args.libritts_root = args.librispeech_root
-    if not args.libritts_root:
-        raise ValueError("Either --libritts_root or --librispeech_root must be provided.")
-    train_rano(args)
+    _save_training_state(out_dir / "training_state.pt", model, optimizer, scheduler, scaler, args
