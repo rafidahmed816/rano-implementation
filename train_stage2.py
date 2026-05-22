@@ -27,7 +27,7 @@ import torch
 import torch.nn.functional as F
 from torch.optim import Adam
 from torch.optim.lr_scheduler import StepLR
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
@@ -103,56 +103,52 @@ def _load_training_state(
 
 @torch.no_grad()
 def _validate(
-    model: Rano,
-    uncompiled_anonymizer,          # original Anonymizer BEFORE torch.compile()
-    val_loader,
+    uncompiled_anonymizer: torch.nn.Module,
+    model: torch.nn.Module,
+    val_cache: list,
     device: torch.device,
     use_amp: bool,
     amp_dtype: torch.dtype,
     step: int,
+    batch_size: int,
     num_batches: int = 10,
 ) -> dict[str, float]:
-    """Run validation using the UNCOMPILED anonymizer module.
+    """Run validation using the UNCOMPILED anonymizer and a preloaded cache.
 
-    KEY FIX: We deliberately pass the original (pre-compile) Anonymizer object.
-    Calling the compiled wrapper in eval() mode triggers CUDA-graph recapture
-    which deadlocks against in-flight training kernels on the same stream.
-    The uncompiled anonymizer has identical weights (shared nn.Module state)
-    and produces numerically identical output.
-
-    We also do NOT call .eval()/.train() — the Anonymizer has no BatchNorm or
-    Dropout, so mode switching has zero effect and only risks graph invalidation.
+    Uses a pre-built list of sample dicts (val_cache) so there is ZERO disk I/O,
+    ZERO DataLoader usage, and ZERO background threads during validation.
+    The uncompiled anonymizer is used so CUDA-graph compiled modules are never
+    invoked during validation.
     """
-    _log(f"[VAL] step={step} — entering validation (uncompiled anonymizer, no mode switch)")
+    from torch.utils.data import default_collate
+
+    _log(f"[VAL] step={step} — entering validation (cache={len(val_cache)} samples)")
 
     totals = {"consistency": 0.0}
     count = 0
-    data_iter = iter(val_loader)
 
     for batch_idx in range(num_batches):
-        _log(f"[VAL] step={step} batch {batch_idx+1}/{num_batches} — loading data")
-        try:
-            batch = next(data_iter)
-        except StopIteration:
-            _log(f"[VAL] step={step} — val_loader exhausted after {batch_idx} batches")
+        start = batch_idx * batch_size
+        end = start + batch_size
+        if start >= len(val_cache):
             break
-
-        mel = batch["mel"].to(device, non_blocking=True)
+        chunk = val_cache[start:end]
+        if len(chunk) == 0:
+            break
+        batch = default_collate(chunk)
+        mel = batch["mel"].to(device, non_blocking=False)
         if mel.dim() == 4:
             mel = mel.squeeze(1)
 
-        _log(f"[VAL] step={step} batch {batch_idx+1} — running ASV forward")
         with torch.amp.autocast(device_type=device.type, enabled=use_amp, dtype=amp_dtype):
             s = model.asv(mel)
-            _log(f"[VAL] step={step} batch {batch_idx+1} — running uncompiled anonymizer forward")
             x_hat, _ = uncompiled_anonymizer(mel, s)
             val_cons = F.mse_loss(x_hat, mel)
 
         totals["consistency"] += val_cons.item()
         count += 1
-        _log(f"[VAL] step={step} batch {batch_idx+1} — cons={val_cons.item():.6f}")
 
-    _log(f"[VAL] step={step} — validation done ({count} batches)")
+    _log(f"[VAL] step={step} — done ({count} batches)")
     if count == 0:
         return {"consistency": 0.0}
     return {k: v / count for k, v in totals.items()}
@@ -217,21 +213,21 @@ def train_rano(args) -> None:
     )
     _log(f"Validation dataset: {len(val_dataset)} samples")
 
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        # FIX: val_loader only runs for 10 batches every 500 steps.
-        # Spawning new worker processes (num_workers > 0) every 500 steps without
-        # exhausting the iterator leaks shared memory (/dev/shm) and file descriptors.
-        # At step 6000 (12th validation), /dev/shm fills up and the DataLoader deadlocks.
-        # Setting num_workers=0 runs it safely in the main thread (plenty fast for 10 batches).
-        num_workers=0,
-        # FIX 2: PyTorch's pin_memory=True spawns a background PinMemoryThread even with num_workers=0.
-        # Dropping the iterator early after 10 batches leaks these threads or deadlocks their queue.
-        # We disable it for validation to make it 100% synchronous and safe to drop.
-        pin_memory=False,
-    )
+    # --- Pre-load validation cache ---
+    # Each sample requires FLAC decode + resample + mel spectrogram on CPU.
+    # batch_size*10 = 1280 samples takes ~10 min.  We only need ~1 batch worth
+    # of data for a meaningful validation signal (it's just for monitoring).
+    _val_cache_size = min(len(val_dataset), 64)
+    print(f"Pre-loading {_val_cache_size} validation samples into RAM...", flush=True)
+    _val_cache = []
+    for _ci in range(_val_cache_size):
+        try:
+            _val_cache.append(val_dataset[_ci])
+        except Exception as _e:
+            pass  # skip bad files silently
+        if (_ci + 1) % 20 == 0:
+            print(f"  ... {_ci + 1}/{_val_cache_size} loaded", flush=True)
+    print(f"Validation cache ready: {len(_val_cache)} samples", flush=True)
 
     # --- Build model ---
     _log("Building Rano model...")
@@ -513,8 +509,8 @@ def train_rano(args) -> None:
                 _log(f"[STEP {step}] cuda.synchronize() done")
 
             val_losses = _validate(
-                model, _uncompiled_anonymizer, val_loader,
-                device, use_amp, amp_dtype, step,
+                _uncompiled_anonymizer, model, _val_cache,
+                device, use_amp, amp_dtype, step, args.batch_size
             )
             writer.add_scalar("val/consistency", val_losses["consistency"], step)
             tqdm.write(

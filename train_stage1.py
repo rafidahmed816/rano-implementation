@@ -34,7 +34,7 @@ def train_acg(args):
         num_workers=args.num_workers,
         pin_memory=True,
         persistent_workers=(args.num_workers > 0),
-        prefetch_factor=2,
+        prefetch_factor=4,
         drop_last=True,
     )
 

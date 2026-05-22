@@ -217,9 +217,9 @@ python train_stage1.py \
     --librispeech_subsets train-clean-360 \
     --asv_checkpoint checkpoints/asv.pt \
     --output_dir checkpoints/acg \
-    --batch_size 128 \
+    --batch_size 256 \
     --iterations 100000 \
-    --num_workers 8
+    --num_workers 12
 ```
 
 | Parameter | Value | Rationale |
@@ -256,7 +256,7 @@ python train_stage2.py \
     --iterations 200000 \
     --lr 1e-5 \
     --val_every 500 \
-    --num_workers 16 \
+    --num_workers 14 \
     --amp \
     --compile
 ```
@@ -517,3 +517,18 @@ If GPU utilization is low (<90%) and `nvidia-smi` shows low GPU usage:
 cp -r /workspace/data/LibriSpeech /tmp/LibriSpeech
 # Then use --librispeech_root /tmp/LibriSpeech
 ```
+
+python train_stage2.py \
+    --librispeech_root /workspace/data/LibriSpeech \
+    --librispeech_subsets train-clean-360 \
+    --acg_checkpoint checkpoints/acg/acg_final.pt \
+    --asv_checkpoint checkpoints/asv.pt \
+    --output_dir checkpoints/rano \
+    --log_dir logs/rano \
+    --batch_size 128 \
+    --accumulate_steps 1 \
+    --iterations 200000 \
+    --lr 1e-5 \
+    --val_every 1000 \
+    --num_workers 10 \
+    --amp
