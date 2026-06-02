@@ -165,3 +165,8 @@ Rano_Restorable_Speaker_Anonymization_via_Conditional_Invertible_Neural_Network.
 *Rano_Restorable_Speaker_Anonymization_via_Conditional_Invertible_Neural_Network.pdf
 /Rano_Restorable_Speaker_Anonymization_via_Conditional_Invertible_Neural_Network.pdf
 
+#evaluation results
+eval_audio_outputs/
+eval_math_vocoders/
+eval_math_vocoders_v2/
+eval_pseudo_inverse/

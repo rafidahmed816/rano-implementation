@@ -26,23 +26,22 @@ class HiFiGANVocoder:
         self.use_grifflim_fallback = False
         self.hifigan_type = None
 
-        if self._try_speechbrain_hifigan():
-            print(f"[OK] HiFi-GAN loaded from SpeechBrain (tts-hifigan-ljspeech)")
-            return
-
+        # 1. FORCE SPEECHT5 FIRST
         if self._try_transformers_hifigan():
             print(f"[OK] HiFi-GAN loaded from transformers (SpeechT5HifiGan)")
             return
 
+        # 2. SPEECHBRAIN AS SECONDARY
+        if self._try_speechbrain_hifigan():
+            print(f"[OK] HiFi-GAN loaded from SpeechBrain (tts-hifigan-ljspeech)")
+            return
+
+        # 3. GRIFFIN-LIM AS FINAL FALLBACK
         if fallback_to_griffin_lim:
             print(f"[WARN] HiFi-GAN unavailable. Will use Griffin-Lim vocoding.")
             self.use_grifflim_fallback = True
         else:
-            raise RuntimeError(
-                "[ERROR] HiFi-GAN vocoder failed to load and Griffin-Lim fallback disabled.\n"
-                "    Install: pip install speechbrain transformers\n"
-                "    Or set fallback_to_griffin_lim=True"
-            )
+            raise RuntimeError("Vocoders failed to load.")
 
     def _try_speechbrain_hifigan(self) -> bool:
         """SpeechBrain tts-hifigan-ljspeech: 80 mel channels, 22050 Hz."""

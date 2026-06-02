@@ -14,7 +14,8 @@ import json
 from pathlib import Path
 
 import torch
-import torchaudio
+import soundfile as sf
+import numpy as np
 from tqdm import tqdm
 
 from model import Rano
@@ -41,8 +42,12 @@ def anonymize_dir(args):
                 speaker_keys[spk] = torch.randn(1, args.embed_dim, device=device)
 
             key = speaker_keys[spk]
-            wav, sr = torchaudio.load(path)
-            wav = processor.resample(wav.mean(0), sr)
+            # Load audio using soundfile (no torchcodec needed)
+            wav_np, sr = sf.read(str(path))
+            wav = torch.from_numpy(wav_np).float()
+            if wav.dim() == 2:
+                wav = wav.mean(1)
+            wav = processor.resample(wav, sr)
             mel = processor.wav_to_mel(wav).to(device)
             # Ensure (B, 80, T) shape
             if mel.dim() == 4:
@@ -54,7 +59,9 @@ def anonymize_dir(args):
             out_path.parent.mkdir(parents=True, exist_ok=True)
             # Use HiFi-GAN vocoder (§IV-A: "We utilize Hifi-GAN [39] as the vocoder")
             anon_wav = processor.mel_to_wav(xa.cpu())
-            torchaudio.save(str(out_path), anon_wav, processor.sample_rate)
+            # Convert tensor to numpy for soundfile
+            anon_wav_np = anon_wav.squeeze(0).numpy() if anon_wav.dim() > 1 else anon_wav.numpy()
+            sf.write(str(out_path), anon_wav_np, processor.sample_rate)
 
             key_store[spk] = speaker_keys[spk].cpu().tolist()
 
@@ -85,8 +92,12 @@ def restore_dir(args):
             key = torch.tensor(key_store[spk], device=device)
             if key.dim() == 1:
                 key = key.unsqueeze(0)
-            wav, sr = torchaudio.load(path)
-            wav = processor.resample(wav.mean(0), sr)
+            # Load audio using soundfile (no torchcodec needed)
+            wav_np, sr = sf.read(str(path))
+            wav = torch.from_numpy(wav_np).float()
+            if wav.dim() == 2:
+                wav = wav.mean(1)
+            wav = processor.resample(wav, sr)
             mel = processor.wav_to_mel(wav).to(device)
             if mel.dim() == 4:
                 mel = mel.squeeze(1)
@@ -107,8 +118,11 @@ def restore_dir(args):
             print(f"  Has NaN: {has_nan}, Has Inf: {has_inf}")
 
             if has_nan or has_inf:
-                print(f"  [ERROR] Numerical issue detected! Skipping vocoding for {path}")
-                continue
+                print(f"  [ERROR] Numerical issue detected! Clipping to safe range...")
+                # Clip to reasonable mel range to prevent vocoder instability
+                mel_min, mel_max = -12.0, 12.0
+                xr = torch.clamp(xr, mel_min, mel_max)
+                print(f"  Clipped to [{mel_min}, {mel_max}]")
 
             out_path = out_dir / path.relative_to(args.input)
             out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -120,12 +134,44 @@ def restore_dir(args):
                 f"  Vocoded wav: min={restored_wav.min():.6f}, max={restored_wav.max():.6f}, mean={restored_wav.mean():.6f}"
             )
 
-            torchaudio.save(str(out_path), restored_wav, processor.sample_rate)
+            # Save using soundfile (no torchcodec needed)
+            restored_wav_np = restored_wav.squeeze(0).numpy() if restored_wav.dim() > 1 else restored_wav.numpy()
+            sf.write(str(out_path), restored_wav_np, processor.sample_rate)
 
 
 def _load_model(args, device):
     model = Rano(embed_dim=args.embed_dim, num_cinn_blocks=args.num_cinn_blocks).to(device)
-    model.load_state_dict(torch.load(args.checkpoint, map_location=device))
+    
+    # Load anonymizer checkpoint
+    state_dict = torch.load(args.checkpoint, map_location=device)
+    print(f"[INFO] Loaded anonymizer checkpoint: {args.checkpoint}")
+    print(f"[INFO] Anonymizer state_dict keys (first 5): {list(state_dict.keys())[:5]}")
+    
+    # Handle torch.compile() wrapped checkpoints (_orig_mod. prefix)
+    if any(k.startswith("_orig_mod.") for k in state_dict.keys()):
+        print("[INFO] Detected torch.compile() wrapping, removing _orig_mod. prefix...")
+        state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
+    
+    # Load into model.anonymizer (checkpoint contains only anonymizer weights)
+    model.anonymizer.load_state_dict(state_dict, strict=False)
+    
+    # Load ACG checkpoint (required for restoration)
+    if hasattr(args, 'acg_checkpoint') and args.acg_checkpoint:
+        try:
+            acg_state = torch.load(args.acg_checkpoint, map_location=device)
+            print(f"[INFO] Loaded ACG checkpoint: {args.acg_checkpoint}")
+            print(f"[INFO] ACG state_dict keys: {list(acg_state.keys())[:3]}")
+            
+            # Handle torch.compile() wrapped ACG checkpoint too
+            if any(k.startswith("_orig_mod.") for k in acg_state.keys()):
+                print("[INFO] Detected torch.compile() wrapping in ACG, removing _orig_mod. prefix...")
+                acg_state = {k.replace("_orig_mod.", ""): v for k, v in acg_state.items()}
+            
+            model.acg.load_state_dict(acg_state, strict=False)
+            print("[OK] ACG loaded successfully")
+        except FileNotFoundError:
+            print(f"[WARN] ACG checkpoint not found: {args.acg_checkpoint}, using random initialization")
+    
     model.eval()
     return model
 
@@ -139,6 +185,8 @@ if __name__ == "__main__":
         sp.add_argument("--input", required=True)
         sp.add_argument("--output", required=True)
         sp.add_argument("--checkpoint", required=True)
+        sp.add_argument("--acg_checkpoint", type=str, default="checkpoints/acg/acg_best.pt",
+                        help="ACG checkpoint for conditioning (required for restoration)")
         sp.add_argument("--embed_dim", type=int, default=256)
         sp.add_argument("--num_cinn_blocks", type=int, default=12)
         if cmd == "restore":
