@@ -204,13 +204,16 @@ class Rano(nn.Module):
         x: (B, 80, T), key: (B, 256).
         Returns (anonymized_mel, cond) — store key for restoration.
 
-        FIX: Cast tensors to fp64 instead of mutating module dtype with
-        .double(). self.anonymizer.double() mutates module state mid-execution
-        which breaks torch.compile's cached graph and forces recompilation
-        or deadlock. Casting input tensors is equivalent and compile-safe.
+        Uses float64 for the full forward pass to minimize numerical error
+        that would compound during the inverse (restoration).
         """
         cond = self.acg.generate(key)
+        # Convert entire anonymizer to float64 so ALL operations (weights,
+        # biases, intermediate activations) use double precision.
+        orig_dtype = next(self.anonymizer.parameters()).dtype
+        self.anonymizer.double()
         xa, _ = self.anonymizer(x.double(), cond.double())
+        self.anonymizer.to(orig_dtype)
         return xa.float(), cond
 
     @torch.no_grad()
@@ -218,10 +221,21 @@ class Rano(nn.Module):
         """
         Restore anonymized mel → original mel using the correct key (§4.2).
 
-        FIX: Same as anonymize() — cast tensors not module dtype.
-        self.anonymizer.double() followed by .to(orig_dtype) mutates module
-        state which breaks compiled graph assumptions.
+        CRITICAL: The entire anonymizer must be in float64 during inverse.
+        Just casting input tensors to .double() does NOT work — Conv1d/Linear
+        layers cast inputs back to match their weight dtype (float32), so the
+        computation still runs in float32 and numerical errors compound
+        across 12 cINN blocks, causing values to explode to 1e23.
+
+        Converting the model weights to float64 ensures ALL intermediate
+        computations use double precision, reducing per-block error from
+        ~1e-7 (fp32) to ~1e-16 (fp64), which stays bounded over 12 blocks.
         """
         cond = self.acg.generate(key)
+        # Convert entire anonymizer to float64
+        orig_dtype = next(self.anonymizer.parameters()).dtype
+        self.anonymizer.double()
         xr = self.anonymizer.inverse(xa.double(), cond.double())
+        # Restore to original dtype
+        self.anonymizer.to(orig_dtype)
         return xr.float()

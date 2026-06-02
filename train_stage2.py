@@ -76,7 +76,11 @@ def _save_training_state(
     }
     if scaler is not None:
         state["scaler_state_dict"] = scaler.state_dict()
-    torch.save(state, path)
+    
+    # Save safely to avoid corruption if interrupted
+    tmp_path = path.with_suffix(".pt.tmp")
+    torch.save(state, tmp_path)
+    tmp_path.replace(path)
 
 
 def _load_training_state(
@@ -104,7 +108,7 @@ def _load_training_state(
 @torch.no_grad()
 def _validate(
     uncompiled_anonymizer: torch.nn.Module,
-    model: torch.nn.Module,
+    uncompiled_asv: torch.nn.Module,
     val_cache: list,
     device: torch.device,
     use_amp: bool,
@@ -141,7 +145,7 @@ def _validate(
             mel = mel.squeeze(1)
 
         with torch.amp.autocast(device_type=device.type, enabled=use_amp, dtype=amp_dtype):
-            s = model.asv(mel)
+            s = uncompiled_asv(mel)
             x_hat, _ = uncompiled_anonymizer(mel, s)
             val_cons = F.mse_loss(x_hat, mel)
 
@@ -291,19 +295,21 @@ def train_rano(args) -> None:
     model._amp_dtype = amp_dtype
     model._device_type = device.type
 
-    # --- CRITICAL: save uncompiled anonymizer reference BEFORE torch.compile ---
-    # _validate() will use this reference exclusively.  Calling the compiled
-    # module during validation (in eval mode, or with val-set shaped inputs that
-    # differ from training shapes) triggers CUDA-graph recapture which deadlocks.
+    # --- CRITICAL: save uncompiled references BEFORE torch.compile ---
+    # _validate() will use these references exclusively so ZERO compiled code
+    # runs during validation. This prevents CUDA-graph recapture deadlocks AND
+    # Inductor-related memory fragmentation after 30k+ steps.
     _uncompiled_anonymizer = model.anonymizer
-    _log(f"Uncompiled anonymizer reference saved: {type(_uncompiled_anonymizer).__name__}")
+    _uncompiled_asv = model.asv
+    _log(f"Uncompiled refs saved: anonymizer={type(_uncompiled_anonymizer).__name__}, asv={type(_uncompiled_asv).__name__}")
 
     # --- torch.compile (optional) ---
     if args.compile and hasattr(torch, "compile"):
         # ── Anonymizer ─────────────────────────────────────────────────────────
-        # mode="reduce-overhead" → CUDA Graphs. Safe because _validate() uses
-        # _uncompiled_anonymizer exclusively — the compiled wrapper is NEVER
-        # called during validation, so there is no eval-mode graph recapture.
+        # mode="reduce-overhead" → CUDA Graphs for maximum speed (~30h vs ~50h).
+        # Previous 30k deadlock was caused by calling compiled ASV during validation.
+        # Now that validation uses _uncompiled_asv + _uncompiled_anonymizer +
+        # empty_cache(), reduce-overhead is safe.
         # dynamic=False: drop_last=True guarantees constant batch size B.
         _log("Compiling anonymizer with torch.compile(mode='reduce-overhead', dynamic=False) ...")
         _log("  (first forward pass will be slow — 3-8 min for 12 RRDB blocks)")
@@ -373,23 +379,52 @@ def train_rano(args) -> None:
     start_step = 0
     best_val_loss = float("inf")
 
+    def try_load(resume_path):
+        try:
+            return _load_training_state(resume_path, model, optimizer, scheduler, scaler, device)
+        except Exception as e:
+            _log(f"[WARN] Failed to load {resume_path}: {e}")
+            print(f"\n[WARNING] Checkpoint {resume_path} is corrupted! ({e})", flush=True)
+            return None
+
     if args.resume:
         resume_path = Path(args.resume)
         if resume_path.exists():
             _log(f"Resuming from explicit checkpoint: {resume_path}")
-            start_step, best_val_loss = _load_training_state(
-                resume_path, model, optimizer, scheduler, scaler, device
-            )
-            _log(f"Resumed at step={start_step}  best_val_loss={best_val_loss:.6f}")
+            res = try_load(resume_path)
+            if res:
+                start_step, best_val_loss = res
+                _log(f"Resumed at step={start_step}  best_val_loss={best_val_loss:.6f}")
         else:
             _log(f"[WARN] Explicit resume checkpoint not found: {resume_path} — starting from scratch")
     elif (out_dir / "training_state.pt").exists():
         _log(f"Auto-resuming from {out_dir / 'training_state.pt'}")
-        start_step, best_val_loss = _load_training_state(
-            out_dir / "training_state.pt", model, optimizer, scheduler, scaler, device
-        )
-        _log(f"Resumed at step={start_step}  best_val_loss={best_val_loss:.6f}")
-
+        res = try_load(out_dir / "training_state.pt")
+        if res:
+            start_step, best_val_loss = res
+            _log(f"Resumed at step={start_step}  best_val_loss={best_val_loss:.6f}")
+        else:
+            # Fallback: recover from the latest anonymizer_step*.pt
+            import glob
+            import re
+            step_ckpts = glob.glob(str(out_dir / "anonymizer_step*.pt"))
+            if step_ckpts:
+                def extract_step(p):
+                    m = re.search(r"anonymizer_step(\d+)\.pt", p)
+                    return int(m.group(1)) if m else -1
+                latest_ckpt = max(step_ckpts, key=extract_step)
+                latest_step = extract_step(latest_ckpt)
+                if latest_step > 0:
+                    print(f"[RECOVERY] Found latest uncorrupted weights: {latest_ckpt}", flush=True)
+                    model.anonymizer.load_state_dict(torch.load(latest_ckpt, map_location=device, weights_only=True))
+                    start_step = latest_step
+                    # Advance the scheduler to the correct learning rate
+                    optimizer.zero_grad()
+                    optimizer.step() # dummy step to avoid PyTorch warning
+                    for _ in range(start_step):
+                        scheduler.step()
+                    print(f"[RECOVERY] Resuming from step {start_step}. (Optimizer state was lost, starting fresh Adam).", flush=True)
+                    
     # --- Training loop ---
     optimizer.zero_grad(set_to_none=True)
     data_iter = iter(loader)
@@ -483,7 +518,7 @@ def train_rano(args) -> None:
             writer.add_scalar("perf/step_time", avg_step_time, step)
 
         # --- Console logging (every 1000 steps) ---
-        if step % 1000 == 0:
+        if step % 2500 == 0:
             avg_step_time = sum(step_times[-1000:]) / len(step_times[-1000:])
             remaining_steps = args.iterations - step
             eta_hours = (remaining_steps * avg_step_time) / 3600
@@ -504,12 +539,11 @@ def train_rano(args) -> None:
             # Explicit CUDA sync BEFORE validation so any in-flight training
             # kernels are fully retired before we touch the anonymizer.
             if device.type == "cuda":
-                _log(f"[STEP {step}] cuda.synchronize() before validation")
                 torch.cuda.synchronize()
-                _log(f"[STEP {step}] cuda.synchronize() done")
+                torch.cuda.empty_cache()  # defragment GPU memory
 
             val_losses = _validate(
-                _uncompiled_anonymizer, model, _val_cache,
+                _uncompiled_anonymizer, _uncompiled_asv, _val_cache,
                 device, use_amp, amp_dtype, step, args.batch_size
             )
             writer.add_scalar("val/consistency", val_losses["consistency"], step)

@@ -227,7 +227,11 @@ def _load_model(args, device):
     if hasattr(args, 'rano_checkpoint') and args.rano_checkpoint:
         rano_path = Path(args.rano_checkpoint)
         if rano_path.exists():
-            model.load_state_dict(torch.load(rano_path, map_location=device))
+            state_dict = torch.load(rano_path, map_location=device)
+            # Handle torch.compile() wrapping
+            if any(k.startswith("_orig_mod.") for k in state_dict.keys()):
+                state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
+            model.load_state_dict(state_dict)
             print(f"Loaded combined Rano from {rano_path}")
             model.eval()
             return model
@@ -235,7 +239,11 @@ def _load_model(args, device):
     # Load ACG (Stage 1) — §III-E: "ACG is pre-trained"
     acg_path = Path(args.acg_checkpoint)
     if acg_path.exists():
-        model.acg.load_state_dict(torch.load(acg_path, map_location=device))
+        acg_state = torch.load(acg_path, map_location=device)
+        # Handle torch.compile() wrapping
+        if any(k.startswith("_orig_mod.") for k in acg_state.keys()):
+            acg_state = {k.replace("_orig_mod.", ""): v for k, v in acg_state.items()}
+        model.acg.load_state_dict(acg_state)
         print(f"Loaded ACG from {acg_path}")
     else:
         print(f"[WARN] ACG not found: {acg_path} — using random weights")
@@ -243,7 +251,11 @@ def _load_model(args, device):
     # Load Anonymizer (Stage 2)
     anon_path = Path(args.anonymizer_ckpt)
     if anon_path.exists():
-        model.anonymizer.load_state_dict(torch.load(anon_path, map_location=device))
+        anon_state = torch.load(anon_path, map_location=device)
+        # Handle torch.compile() wrapping
+        if any(k.startswith("_orig_mod.") for k in anon_state.keys()):
+            anon_state = {k.replace("_orig_mod.", ""): v for k, v in anon_state.items()}
+        model.anonymizer.load_state_dict(anon_state)
         print(f"Loaded Anonymizer from {anon_path}")
     else:
         raise FileNotFoundError(f"Anonymizer checkpoint not found: {anon_path}")
