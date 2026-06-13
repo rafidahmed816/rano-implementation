@@ -26,14 +26,14 @@ class HiFiGANVocoder:
         self.use_grifflim_fallback = False
         self.hifigan_type = None
 
-        # 1. FORCE SPEECHT5 FIRST
-        if self._try_transformers_hifigan():
-            print(f"[OK] HiFi-GAN loaded from transformers (SpeechT5HifiGan)")
-            return
-
-        # 2. SPEECHBRAIN AS SECONDARY
+        # 1. SpeechBrain tts-hifigan-ljspeech — mel-compatible (22050Hz, 80mel, n_fft=1024)
         if self._try_speechbrain_hifigan():
             print(f"[OK] HiFi-GAN loaded from SpeechBrain (tts-hifigan-ljspeech)")
+            return
+
+        # 2. Transformers SpeechT5HifiGan — fallback (different mel config, may be lower quality)
+        if self._try_transformers_hifigan():
+            print(f"[OK] HiFi-GAN loaded from transformers (SpeechT5HifiGan)")
             return
 
         # 3. GRIFFIN-LIM AS FINAL FALLBACK
@@ -103,8 +103,9 @@ class HiFiGANVocoder:
             else:
                 # transformers SpeechT5HifiGan expects (B, T, 80)
                 mel_t = mel.transpose(1, 2).to(self.device)
-                wav = self.model(mel_t).waveform  # (B, T_wav)
-                wav = wav.unsqueeze(1)  # (B, 1, T_wav)
+                wav = self.model(mel_t)  # Returns tensor directly (B, T_wav)
+                if wav.dim() == 2:
+                    wav = wav.unsqueeze(1)  # (B, 1, T_wav)
 
             return wav.cpu()
         except Exception as e:

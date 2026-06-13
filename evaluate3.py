@@ -32,6 +32,11 @@ from audio import MelProcessor
 
 MCD_SR = 16000
 
+# Mel clamping for HiFi-GAN vocoder (from quick_infer.py)
+# cINN pushes some frames below -11.5 dB; HiFi-GAN was never trained below this
+MEL_MIN = -11.5
+MEL_MAX = 2.0
+
 # ============================================================
 # SPECTRAL POST-FILTER
 # Smooths magnitude spectrogram before inversion.
@@ -260,13 +265,18 @@ def transcribe(whisper_model, wav: np.ndarray, sr: int) -> str:
         wav = torchaudio.functional.resample(torch.tensor(wav), sr, 16000).numpy()
     wav = peak_normalize(wav)
     audio = whisper.pad_or_trim(wav)
-    mel = whisper.log_mel_spectrogram(audio).to(whisper_model.device)
+    n_mels = whisper_model.dims.n_mels  # 80 for base/small, 128 for large/large-v2
+    mel = whisper.log_mel_spectrogram(audio, n_mels=n_mels).to(whisper_model.device)
     opts = whisper.DecodingOptions(language="en", without_timestamps=True, fp16=False)
     return whisper.decode(whisper_model, mel, opts).text
-
+from whisper.normalizers import EnglishTextNormalizer
+normalizer = EnglishTextNormalizer()
 def calculate_wer(ref: str, hyp: str) -> float:
-    r, h = ref.lower().split(), hyp.lower().split()
-    if len(r) == 0: return 0.0
+    ref_n = normalizer(ref)
+    hyp_n = normalizer(hyp)
+    r, h = ref_n.split(), hyp_n.split()
+    if len(r) == 0:
+        return 0.0
     dp = np.zeros((len(r) + 1, len(h) + 1))
     for i in range(len(r) + 1): dp[i][0] = i
     for j in range(len(h) + 1): dp[0][j] = j
@@ -334,17 +344,22 @@ def evaluate(args):
     print(f"Device: {device}")
 
     # Resolve anonymization vocoder mode
-    anon_mode = args.anon_mode   # "griffinlim" or "perturbed_phase"
-    print(f"Anonymization vocoder mode: {anon_mode}")
-    print(f"Spectral post-filter: {'ON' if args.post_filter else 'OFF'}")
+    vocoder_mode = args.vocoder  # "hifigan" or "pseudoinverse"
+    anon_mode = args.anon_mode   # only for pseudoinverse mode
+    print(f"Vocoder: {vocoder_mode}")
+    if vocoder_mode == "pseudoinverse":
+        print(f"  Pseudo-inverse mode: {anon_mode}")
+        print(f"  Spectral post-filter: {'ON' if args.post_filter else 'OFF'}")
 
     save_audio_dir = Path(args.save_audio_dir)
     save_audio_dir.mkdir(parents=True, exist_ok=True)
     print(f"Generated audio will be saved to: {save_audio_dir}")
 
-    # MelProcessor — 16kHz to match LibriSpeech and InverseMelScale config
-    processor = MelProcessor(device=device, use_hifigan=False, sample_rate=16000)
-    proc_sr = 16000
+    # MelProcessor — 22050Hz to match training (train_stage2.py uses default=22050)
+    # Using 16kHz caused cINN numerical explosions (values up to 1e18) because
+    # the mel filterbank produces OOD inputs for the 22050Hz-trained model.
+    processor = MelProcessor(device=device, use_hifigan=(vocoder_mode == "hifigan"), sample_rate=22050)
+    proc_sr = 22050
 
     rano_model = load_rano(args, device)
     extract_asv_emb = load_asv(device)
@@ -352,7 +367,7 @@ def evaluate(args):
     whisper_model = None
     if args.compute_wer:
         import whisper
-        whisper_model = whisper.load_model("large-v2").to(device)
+        whisper_model = whisper.load_model("large").to(device)
         print("Whisper loaded.")
 
     # Ground truth transcripts from LibriSpeech
@@ -398,27 +413,37 @@ def evaluate(args):
             # ── 1. Anonymize ─────────────────────────────────────────────────
             xa, cond = rano_model.anonymize(mel, key)
 
-            anon_wav = pseudo_inverse_vocoder(
-                xa, orig_wav=wav_16k, sr=proc_sr,
-                n_fft=1024, hop_length=256, n_mels=80,
-                mode=anon_mode,                         # griffinlim or perturbed_phase
-                pitch_shift_semitones=args.pitch_shift,
-                griffinlim_iters=128,
-                apply_post_filter=args.post_filter,
-            )
+            if vocoder_mode == "hifigan":
+                xa_clamped = xa.clamp(MEL_MIN, MEL_MAX)
+                anon_wav_t = processor.mel_to_wav(xa_clamped.cpu())
+                anon_wav = anon_wav_t.squeeze(0).numpy()
+            else:
+                anon_wav = pseudo_inverse_vocoder(
+                    xa, orig_wav=wav_16k, sr=proc_sr,
+                    n_fft=1024, hop_length=256, n_mels=80,
+                    mode=anon_mode,
+                    pitch_shift_semitones=args.pitch_shift,
+                    griffinlim_iters=128,
+                    apply_post_filter=args.post_filter,
+                )
             anon_wav = peak_normalize(anon_wav)
 
             # ── 2. Restore ───────────────────────────────────────────────────
             xr = rano_model.restore(xa, key)
 
-            # Restoration always uses phase_save — gives maximum Sim_spk/MCD quality
-            restored_wav = pseudo_inverse_vocoder(
-                xr, orig_wav=wav_16k, sr=proc_sr,
-                n_fft=1024, hop_length=256, n_mels=80,
-                mode="phase_save",
-                griffinlim_iters=128,
-                apply_post_filter=args.post_filter,
-            )
+            if vocoder_mode == "hifigan":
+                xr_clamped = xr.clamp(MEL_MIN, MEL_MAX)
+                restored_wav_t = processor.mel_to_wav(xr_clamped.cpu())
+                restored_wav = restored_wav_t.squeeze(0).numpy()
+            else:
+                # phase_save gives maximum Sim_spk/MCD quality for pseudo-inverse
+                restored_wav = pseudo_inverse_vocoder(
+                    xr, orig_wav=wav_16k, sr=proc_sr,
+                    n_fft=1024, hop_length=256, n_mels=80,
+                    mode="phase_save",
+                    griffinlim_iters=128,
+                    apply_post_filter=args.post_filter,
+                )
             restored_wav = peak_normalize(restored_wav)
 
             # ── 3. Save audio ────────────────────────────────────────────────
@@ -474,6 +499,7 @@ def evaluate(args):
 
     result = {k: safe_mean(v) for k, v in metrics.items()}
     result["eer"] = true_eer
+    result["vocoder"] = vocoder_mode
     result["anon_mode"] = anon_mode
     result["post_filter"] = args.post_filter
 
@@ -481,7 +507,7 @@ def evaluate(args):
 
     print(f"\nRANO Evaluation Results — Table I Format (§IV-B)")
     print(f" Speakers: {len(speaker_keys)}  |  Utterances: {len(files)}  |  Time: {elapsed:.1f}s")
-    print(f" Anon Mode: {anon_mode}  |  Post-filter: {args.post_filter}")
+    print(f" Vocoder: {vocoder_mode}  |  Anon Mode: {anon_mode}")
     print("=" * 70)
     print(f" Metric                     Value   Direction  Paper Ref")
     print("-" * 65)
@@ -495,7 +521,7 @@ def evaluate(args):
     print(f" MCD (dB)                   {result['mcd_restored']:>5.2f}    v better  Table III")
     print("=" * 70)
 
-    out_path = "eval_results_math_vocoder_v2.json"
+    out_path = f"eval_results_{vocoder_mode}.json"
     with open(out_path, "w") as f:
         json.dump(result, f, indent=2)
     print(f"\nResults saved to {out_path}")
@@ -506,7 +532,7 @@ def evaluate(args):
 # ============================================================
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser(description="RANO evaluation — Math Vocoder v2")
+    p = argparse.ArgumentParser(description="RANO evaluation (§IV-B)")
     p.add_argument("--test_dir",          required=True)
     p.add_argument("--acg_checkpoint",    required=True)
     p.add_argument("--anonymizer_ckpt",   required=True)
@@ -515,16 +541,27 @@ if __name__ == "__main__":
     p.add_argument("--compute_wer",       action="store_true")
     p.add_argument("--save_audio_dir",    type=str,   default="eval_math_vocoder_v2")
 
-    # Vocoder controls
-    # Vocoder controls
+    # Vocoder selection (paper §IV-A uses HiFi-GAN)
+    p.add_argument(
+        "--vocoder",
+        type=str,
+        default="pseudoinverse",
+        choices=["hifigan", "pseudoinverse"],
+        help=(
+            "hifigan: neural vocoder matching paper §IV-A (default). "
+            "pseudoinverse: Griffin-Lim / perturbed-phase mathematical vocoder."
+        ),
+    )
+    # Pseudo-inverse vocoder controls (only used when --vocoder=pseudoinverse)
     p.add_argument(
         "--anon_mode",
         type=str,
         default="perturbed_phase",
         choices=["griffinlim", "perturbed_phase"],
         help=(
+            "Only for --vocoder=pseudoinverse. "
             "griffinlim: safest EER, worst WER/rho_f0. "
-            "perturbed_phase: better WER/rho_f0, EER still near 50%%." # <-- Added extra % here
+            "perturbed_phase: better WER/rho_f0, EER still near 50%%."
         ),
     )
     p.add_argument(
