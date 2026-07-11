@@ -7,6 +7,7 @@ Inverse:  key ~ N(0,1) → anonymous_speaker_embedding  (inference).
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from blocks import INNBlock, FixedPermutation
 class AnonymizationConditionGenerator(nn.Module):
     def __init__(self, embed_dim: int = 256, num_blocks: int = 8):
@@ -31,12 +32,23 @@ class AnonymizationConditionGenerator(nn.Module):
 
     @torch.no_grad()
     def generate(self, key: torch.Tensor) -> torch.Tensor:
-        """key ~ N(0,1) → anonymous speaker embedding (inverse pass)."""
+        """key ~ N(0,1) → anonymous speaker embedding (inverse pass).
+
+        The raw INN inverse emits vectors with norm ~11 (it cannot contract the
+        norm-16 N(0,1) latent down to the norm-1 unit-sphere the ASV embeddings
+        live on). Feeding such conditions to the cINN drives the FiLM modulation
+        ~11x too hard, pinning every block's log-scale at the +4 clamp so the
+        forward pass multiplies by exp(4)^12 ≈ 1e20 and the mel explodes.
+        L2-normalizing here puts the condition in the SAME unit-norm space as the
+        real ASV embeddings (s) used by the consistency loss, which is the space
+        the cINN must be trained against. Same normalization is applied in both
+        anonymize() and restore() (both call generate), so invertibility holds.
+        """
         sa = key
         for block, perm in zip(reversed(list(self.blocks)), reversed(list(self.perms))):
             sa = perm.inverse(sa)
             sa = block.inverse(sa)
-        return sa
+        return F.normalize(sa, dim=-1)
 
     def loss(self, s: torch.Tensor, tau: float = 0.5) -> torch.Tensor:
         """NLL loss: Eq. 4 — LACG = E[||f(s)||²/2 − log|J|].

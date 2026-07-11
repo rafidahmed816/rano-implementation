@@ -1,11 +1,11 @@
 {
-  "gvd": 1.397265616924532,
-  "rho_f0": 0.09875160930342824,
-  "wer": 35.82981280206201,
-  "sim_spk_restored": 91.60421519510207,
-  "mcd_restored": 52.40437640377537,
-  "eer": 52.227272727177706,
+  "gvd": 0.1692230995123585,
+  "rho_f0": 0.14241933373778118,
+  "wer": NaN,
+  "sim_spk_restored": 52.05705205599467,
+  "mcd_restored": 635.6281758249502,
+  "eer": 17.74122807004633,
   "vocoder": "pseudoinverse",
-  "anon_mode": "perturbed_phase",
-  "post_filter": false
+  "anon_mode": "phase_save",
+  "post_filter": true
 }

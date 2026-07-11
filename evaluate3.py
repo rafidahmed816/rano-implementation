@@ -390,7 +390,13 @@ def evaluate(args):
 
     with torch.no_grad():
         for path in tqdm(files, desc="Processing"):
-            spk = path.parent.name
+            # LibriSpeech files are SPEAKER-CHAPTER-UTT.flac, so the real speaker
+            # is the first filename token — NOT the parent folder (which is the
+            # chapter). Using the folder counts chapters of one speaker as many
+            # speakers and makes EER degenerate. Fall back to the folder for
+            # non-LibriSpeech layouts.
+            _parts = path.stem.split("-")
+            spk = _parts[0] if len(_parts) >= 2 and _parts[0].isdigit() else path.parent.name
             wav_np, sr = sf.read(str(path))
             wav_np = to_mono(wav_np)
 
@@ -557,11 +563,15 @@ if __name__ == "__main__":
         "--anon_mode",
         type=str,
         default="perturbed_phase",
-        choices=["griffinlim", "perturbed_phase"],
+        choices=["griffinlim", "perturbed_phase", "phase_save"],
         help=(
             "Only for --vocoder=pseudoinverse. "
-            "griffinlim: safest EER, worst WER/rho_f0. "
-            "perturbed_phase: better WER/rho_f0, EER still near 50%%."
+            "griffinlim: no phase leak, worst WER/rho_f0. "
+            "perturbed_phase: better WER/rho_f0, but EER is inflated by the pitch "
+            "shift (signal-processing anonymizer), NOT the cINN. "
+            "phase_save: anonymized magnitude + TRUE original phase, no pitch shift "
+            "-> isolates the MODEL's own anonymization (honest model-only EER; "
+            "expect low EER if the cINN is a passthrough)."
         ),
     )
     p.add_argument(
@@ -573,8 +583,10 @@ if __name__ == "__main__":
     p.add_argument(
         "--post_filter",
         action="store_true",
-        default=True,
-        help="Apply Wiener spectral post-filter to reduce musical noise (improves MCD).",
+        default=False,
+        help="Apply spectral post-filter. Default OFF — it was found to DEGRADE "
+             "speaker identity badly (restoration Sim_spk 91.6%% -> 52%%) and inflate "
+             "MCD. Only enable for ablation.",
     )
     p.add_argument(
         "--no_post_filter",

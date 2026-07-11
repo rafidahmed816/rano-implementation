@@ -194,7 +194,17 @@ class VCTKDataset(Dataset):
                 mel = self.processor.wav_to_mel(wav)  # (1, F, T)
                 mel = self._pad_or_trim(mel.squeeze(0))  # (F, T)
                 spk = torch.tensor(self.speaker_ids[path.parent.name], dtype=torch.long)
-                return {"mel": mel, "speaker_id": spk, "path": str(path)}
+                # Include the SAME keys as LibriSpeechDataset so a mixed
+                # ConcatDataset (VCTK + LibriTTS) collates without KeyError.
+                # (transcript is empty — VCTK transcripts live in a separate txt/ tree
+                # and Stage-1/2 training never uses text.)
+                return {
+                    "mel": mel,
+                    "speaker_id": spk,
+                    "path": str(path),
+                    "transcript": "",
+                    "utterance_id": path.stem,
+                }
             except Exception as exc:
                 self._decode_failures += 1
                 if self._decode_failures <= 5:
@@ -266,23 +276,27 @@ class LibriSpeechDataset(Dataset):
                 if not chapter_dir.is_dir():
                     continue
 
+                # LibriSpeech chapters have a single '<spk>-<chap>.trans.txt'.
+                # LibriTTS does NOT (it has '.trans.tsv' + per-utterance
+                # '.normalized.txt'), so transcripts are OPTIONAL here — Stage-2
+                # training uses only mels, never text. When a .trans.txt exists we
+                # still use it (and skip audio with no matching transcript, keeping
+                # WER eval clean); when it doesn't, we include every audio file.
                 trans_files = sorted(chapter_dir.glob("*.trans.txt"))
-                if not trans_files:
-                    continue
-
-                transcript_map = _parse_transcript_file(trans_files[0])
+                transcript_map = _parse_transcript_file(trans_files[0]) if trans_files else {}
                 audio_files = sorted(chapter_dir.glob("*.flac")) + sorted(chapter_dir.glob("*.wav"))
                 for audio_path in audio_files:
                     utt_id = audio_path.stem
                     text = transcript_map.get(utt_id)
-                    if text is None:
+                    if text is None and trans_files:
+                        # LibriSpeech-style dir but this audio has no transcript row.
                         continue
                     speaker_id = audio_path.parts[-3]
                     records.append(
                         {
                             "path": str(audio_path),
                             "speaker": speaker_id,
-                            "transcript": text,
+                            "transcript": text or "",
                         }
                     )
 

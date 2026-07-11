@@ -101,6 +101,7 @@ def train_asv(args):
     # ---- Build datasets ----
     print("Building training dataset ...")
     train_dataset = build_dataset(
+        vctk_root=args.vctk_root,
         libritts_root=args.librispeech_root,
         split="train",
         libritts_subsets=args.librispeech_subsets,
@@ -108,6 +109,7 @@ def train_asv(args):
     )
     print("Building validation dataset ...")
     val_dataset = build_dataset(
+        vctk_root=args.vctk_root,
         libritts_root=args.librispeech_root,
         split="test",
         libritts_subsets=args.librispeech_subsets,
@@ -281,8 +283,11 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser(
         description="Train AdaIN-VC speaker encoder (ASV) on LibriSpeech",
     )
-    p.add_argument("--librispeech_root", type=str, required=True,
-                    help="Path to LibriSpeech root (containing train-clean-100/)")
+    p.add_argument("--vctk_root", type=str, default=None,
+                    help="Path to VCTK-Corpus root (wav48/pXXX/*.wav). Recommended for ASV "
+                         "(matches the paper's VCTK-trained AdaIN-VC encoder).")
+    p.add_argument("--librispeech_root", type=str, default=None,
+                    help="Path to LibriSpeech/LibriTTS root. Use INSTEAD of --vctk_root.")
     p.add_argument("--librispeech_subsets", nargs="+", default=["train-clean-100"])
     p.add_argument("--output", type=str, default="checkpoints/asv.pt",
                     help="Where to save the trained encoder weights")
@@ -301,5 +306,12 @@ if __name__ == "__main__":
 
     if args.no_amp:
         args.amp = False
+
+    # ASV does speaker classification, which needs ONE unified label space.
+    # Combining VCTK + LibriTTS here would produce a ConcatDataset with
+    # overlapping speaker ids (no .speaker_ids attribute) — reject that.
+    if bool(args.vctk_root) == bool(args.librispeech_root):
+        p.error("Provide exactly ONE of --vctk_root or --librispeech_root for ASV "
+                "training (a single corpus = one clean speaker-label space).")
 
     train_asv(args)

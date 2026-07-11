@@ -61,7 +61,10 @@ def calculate_wer(ref: str, hyp: str) -> float:
 # SETUP — EDIT THESE PATHS TO MATCH YOUR SETUP
 # ============================================================
 ACG_CHECKPOINT  = "checkpoints/acg/acg_final.pt"        # adjust path
-ANON_CHECKPOINT = "checkpoints/rano/rano_final.pt"       # adjust path
+# NOTE: must be the ANONYMIZER-ONLY state dict (keys: blocks.*), NOT rano_final.pt
+# (full-model dict, keys: anonymizer.*). Loading the full dict into model.anonymizer
+# with strict=False silently loads NOTHING and leaves the net at zero-init.
+ANON_CHECKPOINT = "checkpoints/rano/anonymizer_final.pt"  # adjust path
 EMBED_DIM       = 256
 NUM_CINN_BLOCKS = 12
 TEST_DIR        = "test_audio"
@@ -100,6 +103,27 @@ class Args:
 
 args = Args()
 rano_model = load_rano(args, device)
+
+# load_rano only loads ACG + anonymizer; the internal ASV stays randomly
+# initialized otherwise. Load the TRAINED ASV so Path B uses real embeddings
+# from the exact distribution the consistency loss was trained against.
+ASV_CHECKPOINT = "checkpoints/asv.pt"
+if Path(ASV_CHECKPOINT).exists():
+    _asv_sd = torch.load(ASV_CHECKPOINT, map_location=device, weights_only=False)
+    if isinstance(_asv_sd, dict) and "state_dict" in _asv_sd:
+        _asv_sd = _asv_sd["state_dict"]
+    _asv_sd = {k.replace("_orig_mod.", ""): v for k, v in _asv_sd.items()}
+    _inc = rano_model.asv.load_state_dict(_asv_sd, strict=False)
+    if _inc.missing_keys:
+        raise RuntimeError(
+            f"Trained ASV did NOT load from {ASV_CHECKPOINT} "
+            f"({len(_inc.missing_keys)} missing keys, e.g. {_inc.missing_keys[:3]})."
+        )
+    print(f"  [OK] Loaded trained ASV from {ASV_CHECKPOINT}")
+else:
+    print(f"  [WARN] {ASV_CHECKPOINT} not found — Path B uses a RANDOM ASV "
+          f"(norm test still valid, but directions are not in-distribution).")
+
 extract_asv_emb = load_asv(device)  # SpeechBrain ECAPA — eval ASV, NOT training ASV
 
 # NOTE: the model's *internal* ASV (uncompiled_asv used during training, the
@@ -132,6 +156,20 @@ for i, block in enumerate(rano_model.anonymizer.blocks):
         scales = [r.scale.item() for r in subnet.rrdb_blocks]
         print(f"  Block {i:2d} {name}: out_proj |w|sum={w:.6f}  |b|sum={b:.6f}  "
               f"rrdb_scales={[f'{s:.6f}' for s in scales]}")
+
+# Hard guard: if the checkpoint failed to load, every out_proj is exactly 0.
+_total_w = sum(
+    sn.out_proj.weight.abs().sum().item()
+    for block in rano_model.anonymizer.blocks
+    for sn in (block.psi, block.phi, block.rho, block.eta)
+)
+if _total_w < 1e-6:
+    raise RuntimeError(
+        f"Anonymizer weights are all zero (sum={_total_w:.2e}) — checkpoint did NOT load. "
+        f"Check ANON_CHECKPOINT='{ANON_CHECKPOINT}' is the anonymizer-only state dict "
+        f"(keys 'blocks.*'), not the full-model 'rano_final.pt' (keys 'anonymizer.*')."
+    )
+print(f"  [OK] Anonymizer loaded — total |out_proj.w| = {_total_w:.3f} (non-zero)")
 
 
 # ============================================================
