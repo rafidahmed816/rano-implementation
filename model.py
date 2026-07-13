@@ -33,12 +33,15 @@ class Rano(nn.Module):
         margin: float = 0.3,
         acg_tau: float = 0.5,
         lambda_logdet: float = 0.01,
+        lambda_anchor: float = 0.0,
+        lambda_range: float = 0.0,
     ):
         super().__init__()
         self.acg = AnonymizationConditionGenerator(embed_dim, num_acg_blocks)
         self.anonymizer = Anonymizer(mel_channels, embed_dim, num_cinn_blocks)
         self.asv = AdaINVCSpeakerEncoder(mel_channels, embed_dim)
-        self.loss_fn = RanoLoss(lambda1, lambda2, margin, lambda_logdet)
+        self.loss_fn = RanoLoss(lambda1, lambda2, margin, lambda_logdet,
+                                lambda_anchor, lambda_range)
         self.acg_tau = acg_tau
 
         # AMP settings — set by train_stage2.py before training starts so that
@@ -131,7 +134,7 @@ class Rano(nn.Module):
         # Steps 10-11: L_tri + L_total (also includes log_det regularization)
         n_elements = x.shape[1] * x.shape[2] * len(self.anonymizer.blocks)
         losses = self.loss_fn(
-            x, x_hat, anchor_emb, cond, s, log_det_anon, n_elements=n_elements
+            x, x_hat, anchor_emb, cond, s, log_det_anon, n_elements=n_elements, xa=xa
         )
 
         if return_distances:

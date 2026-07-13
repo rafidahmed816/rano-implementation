@@ -46,6 +46,8 @@ class RanoLoss(nn.Module):
         lambda2: float = 5.0,
         margin: float = 0.3,
         lambda_logdet: float = 0.01,
+        lambda_anchor: float = 0.0,
+        lambda_range: float = 0.0,
     ):
         super().__init__()
         self.lcons = ConsistencyLoss()
@@ -53,6 +55,8 @@ class RanoLoss(nn.Module):
         self.lambda1 = lambda1
         self.lambda2 = lambda2
         self.lambda_logdet = lambda_logdet
+        self.lambda_anchor = lambda_anchor
+        self.lambda_range = lambda_range
 
     def forward(
         self,
@@ -63,12 +67,33 @@ class RanoLoss(nn.Module):
         orig_emb: torch.Tensor,
         log_det: torch.Tensor | None = None,
         n_elements: int | None = None,
+        xa: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         cons = self.lcons(x, x_hat)
         tri = self.ltri(anchor_emb, cond_emb, orig_emb)
         total = self.lambda1 * cons + self.lambda2 * tri
 
         result = {"total": total, "consistency": cons, "triplet": tri}
+
+        # --- Content preservation on the ANONYMIZATION pass (xa = f(x;c)) ---
+        # The triplet only constrains the ASV *embedding*, which a garbled mel
+        # satisfies as easily as a clean speaker conversion. Without these two
+        # terms the model cheats by scrambling phonetic content and blowing mel
+        # values out of range ([-43,+29]), giving unintelligible anonymized audio.
+        if xa is not None and self.lambda_anchor > 0:
+            # Soft anchor: penalize LARGE deviations from x (garbling) while still
+            # permitting the moderate change needed for speaker conversion.
+            anchor = self.lcons(x, xa)
+            result["anchor"] = anchor
+            result["total"] = result["total"] + self.lambda_anchor * anchor
+        if xa is not None and self.lambda_range > 0:
+            # Keep xa inside the original's per-sample dynamic range (hard stop on
+            # the blow-up that no vocoder can reconstruct).
+            x_lo = x.amin(dim=(1, 2), keepdim=True)
+            x_hi = x.amax(dim=(1, 2), keepdim=True)
+            rng = (F.relu(xa - x_hi) + F.relu(x_lo - xa)).mean()
+            result["range"] = rng
+            result["total"] = result["total"] + self.lambda_range * rng
 
         if log_det is not None and self.lambda_logdet > 0:
             # Normalize log_det by the actual number of elements summed
@@ -85,6 +110,6 @@ class RanoLoss(nn.Module):
             # No clamp needed — per-element values are bounded by [-4, 4].
             logdet_loss = (logdet_normalized ** 2).mean()
             result["logdet"] = logdet_loss
-            result["total"] = total + self.lambda_logdet * logdet_loss
+            result["total"] = result["total"] + self.lambda_logdet * logdet_loss
 
         return result

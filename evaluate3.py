@@ -367,8 +367,8 @@ def evaluate(args):
     whisper_model = None
     if args.compute_wer:
         import whisper
-        whisper_model = whisper.load_model("large").to(device)
-        print("Whisper loaded.")
+        whisper_model = whisper.load_model(args.whisper_model).to(device)
+        print(f"Whisper '{args.whisper_model}' loaded.")
 
     # Ground truth transcripts from LibriSpeech
     transcripts = load_librispeech_transcripts(args.test_dir)
@@ -545,6 +545,9 @@ if __name__ == "__main__":
     p.add_argument("--embed_dim",         type=int,   default=256)
     p.add_argument("--num_cinn_blocks",   type=int,   default=12)
     p.add_argument("--compute_wer",       action="store_true")
+    p.add_argument("--whisper_model",     type=str, default="large",
+                   help="Whisper size for WER. Use 'medium' or 'small' on an 8GB GPU "
+                        "(large needs ~6GB).")
     p.add_argument("--save_audio_dir",    type=str,   default="eval_math_vocoder_v2")
 
     # Vocoder selection (paper §IV-A uses HiFi-GAN)

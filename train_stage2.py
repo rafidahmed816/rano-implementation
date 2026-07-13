@@ -266,6 +266,8 @@ def train_rano(args) -> None:
         lambda2=args.lambda2,
         margin=args.margin,
         lambda_logdet=args.lambda_logdet,
+        lambda_anchor=args.lambda_anchor,
+        lambda_range=args.lambda_range,
     ).to(device)
     _log("Rano model created and moved to device")
 
@@ -586,6 +588,10 @@ def train_rano(args) -> None:
             writer.add_scalar("loss/triplet", losses["triplet"].item(), step)
             if "logdet" in losses:
                 writer.add_scalar("loss/logdet", losses["logdet"].item(), step)
+            if "anchor" in losses:
+                writer.add_scalar("loss/anchor", losses["anchor"].item(), step)
+            if "range" in losses:
+                writer.add_scalar("loss/range", losses["range"].item(), step)
             writer.add_scalar("lr", scheduler.get_last_lr()[0], step)
             avg_step_time = sum(step_times[-100:]) / len(step_times[-100:])
             writer.add_scalar("perf/step_time", avg_step_time, step)
@@ -596,11 +602,13 @@ def train_rano(args) -> None:
             remaining_steps = args.iterations - step
             eta_hours = (remaining_steps * avg_step_time) / 3600
             logdet_str = f"  logdet={losses['logdet'].item():.4f}" if "logdet" in losses else ""
+            anchor_str = f"  anchor={losses['anchor'].item():.3f}" if "anchor" in losses else ""
+            range_str = f"  range={losses['range'].item():.3f}" if "range" in losses else ""
             tqdm.write(
                 f"step={step}  total={losses['total'].item():.4f}"
                 f"  cons={losses['consistency'].item():.4f}"
                 f"  tri={losses['triplet'].item():.4f}"
-                f"{logdet_str}"
+                f"{anchor_str}{range_str}{logdet_str}"
                 f"  lr={scheduler.get_last_lr()[0]:.2e}"
                 f"  step_t={avg_step_time:.2f}s"
                 f"  ETA={eta_hours:.1f}h"
@@ -724,6 +732,12 @@ if __name__ == "__main__":
                         "intermediate-activation explosion that diverges on unseen data. "
                         "Not in paper Eq. 7, but required for THIS implementation's stability. "
                         "Set 0 only for a paper-exact ablation (expect explosions).")
+    p.add_argument("--lambda_anchor", type=float, default=0.0,
+                   help="Content-anchor on the anonymization pass: penalizes MSE(f(x;c), x) "
+                        "so the model can't garble content to fool the ASV. ~0.2 is a start.")
+    p.add_argument("--lambda_range", type=float, default=0.0,
+                   help="Range penalty: keeps the anonymized mel within the original's "
+                        "dynamic range (stops the [-43,+29] blow-up). ~1.0 is a start.")
     p.add_argument("--margin", type=float, default=0.3)
     p.add_argument("--batch_size", type=int, default=16,
                    help="Physical batch size. A100 80GB fits bs=128 with AMP.")

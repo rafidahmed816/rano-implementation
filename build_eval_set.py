@@ -37,12 +37,13 @@ def main():
     trans_copied: set[str] = set()
 
     for spk_dir in chosen_speakers:
-        flacs = sorted(spk_dir.rglob("*.flac"))[: args.per_speaker]
-        if not flacs:
+        # LibriTTS is .wav, VCTK/LibriSpeech are .flac — accept both.
+        audio = (sorted(spk_dir.rglob("*.flac")) + sorted(spk_dir.rglob("*.wav")))[: args.per_speaker]
+        if not audio:
             continue
         dst_dir = out / spk_dir.name
         dst_dir.mkdir(parents=True, exist_ok=True)
-        for f in flacs:
+        for f in audio:
             shutil.copy2(f, dst_dir / f.name)
             # copy the chapter transcript once (for optional --compute_wer)
             for trans in f.parent.glob("*.trans.txt"):
