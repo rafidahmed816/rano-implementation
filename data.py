@@ -163,15 +163,19 @@ class VCTKDataset(Dataset):
         test_ratio: float = 0.15,
         processor: MelProcessor | None = None,
         max_frames: int = 256,
+        speaker_offset: int = 0,
     ):
         self.processor = processor or MelProcessor()
         self.max_frames = max_frames
+        self.speaker_offset = speaker_offset  # for a unified label space across corpora
         files = sorted(Path(root).rglob("*.flac")) + sorted(Path(root).rglob("*.wav"))
         random.seed(42)
         random.shuffle(files)
         split_idx = int(len(files) * (1 - test_ratio))
         self.files = files[:split_idx] if split == "train" else files[split_idx:]
-        speaker_names = sorted({f.parent.name for f in self.files})
+        # Build the speaker map from ALL files (not just this split) so the train
+        # and test instances always share identical ids.
+        speaker_names = sorted({f.parent.name for f in files})
         self.speaker_ids = {name: i for i, name in enumerate(speaker_names)}
         self.max_decode_retries = 20
         self._decode_failures = 0
@@ -193,7 +197,9 @@ class VCTKDataset(Dataset):
                 wav = self.processor.resample(wav.mean(0), sr)  # mono
                 mel = self.processor.wav_to_mel(wav)  # (1, F, T)
                 mel = self._pad_or_trim(mel.squeeze(0))  # (F, T)
-                spk = torch.tensor(self.speaker_ids[path.parent.name], dtype=torch.long)
+                spk = torch.tensor(
+                    self.speaker_offset + self.speaker_ids[path.parent.name], dtype=torch.long
+                )
                 # Include the SAME keys as LibriSpeechDataset so a mixed
                 # ConcatDataset (VCTK + LibriTTS) collates without KeyError.
                 # (transcript is empty — VCTK transcripts live in a separate txt/ tree
@@ -240,9 +246,11 @@ class LibriSpeechDataset(Dataset):
         max_frames: int = 256,
         validate: bool = False,
         fail_on_validation_error: bool = True,
+        speaker_offset: int = 0,
     ):
         self.processor = processor or MelProcessor()
         self.max_frames = max_frames
+        self.speaker_offset = speaker_offset  # for a unified label space across corpora
 
         root_path = Path(root)
         subsets = subsets or ["train-clean-100"]
@@ -310,7 +318,8 @@ class LibriSpeechDataset(Dataset):
         random.shuffle(records)
         split_idx = int(len(records) * (1 - test_ratio))
         self.samples = records[:split_idx] if split == "train" else records[split_idx:]
-        speaker_names = sorted({sample["speaker"] for sample in self.samples})
+        # Build the speaker map from ALL records so train/test instances share ids.
+        speaker_names = sorted({r["speaker"] for r in records})
         self.speaker_ids = {name: i for i, name in enumerate(speaker_names)}
         self.max_decode_retries = 20
         self._decode_failures = 0
@@ -333,7 +342,9 @@ class LibriSpeechDataset(Dataset):
                 wav = self.processor.resample(wav.mean(0), sr)
                 mel = self.processor.wav_to_mel(wav).squeeze(0)  # (F, T)
                 mel = self._pad_or_trim(mel)
-                spk_id = torch.tensor(self.speaker_ids[sample["speaker"]], dtype=torch.long)
+                spk_id = torch.tensor(
+                    self.speaker_offset + self.speaker_ids[sample["speaker"]], dtype=torch.long
+                )
                 return {
                     "mel": mel,
                     "speaker_id": spk_id,

@@ -297,7 +297,12 @@ def train_rano(args) -> None:
     model.asv.load_state_dict(torch.load(asv_ckpt, map_location=device, weights_only=True))
     for p in model.asv.parameters():
         p.requires_grad_(False)
-    _log("ASV loaded and frozen")
+    # CRITICAL: eval() so the frozen ASV's BatchNorm uses its fixed running stats
+    # instead of drifting on (early, weird) anonymized-mel batches. The ACG is also
+    # frozen; eval() is harmless there.
+    model.asv.eval()
+    model.acg.eval()
+    _log("ASV loaded and frozen (eval mode)")
 
     # --- Warm-start the anonymizer from a prior checkpoint (--init_from) ---
     # Loads ONLY anonymizer weights (fresh optimizer, step counter starts at 0,

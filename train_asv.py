@@ -32,27 +32,30 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from speaker_encoder import AdaINVCSpeakerEncoder
+from torch.utils.data import ConcatDataset
+from speaker_encoder import AdaINVCSpeakerEncoder, AAMSoftmax
 from audio import MelProcessor
-from data import build_dataset
+from data import build_dataset, VCTKDataset, LibriSpeechDataset
 
 
 # ---------------------------------------------------------------------------
-# Thin wrapper: encoder + linear classifier
+# Thin wrapper: encoder + AAM-softmax head (discarded after training)
 # ---------------------------------------------------------------------------
 
 class ASVClassifier(nn.Module):
-    """Speaker encoder + classification head (discarded after training)."""
+    """Strong speaker encoder + AAM-softmax head. Only the encoder is saved."""
 
     def __init__(self, mel_channels: int = 80, embed_dim: int = 256,
                  num_speakers: int = 251):
         super().__init__()
         self.encoder = AdaINVCSpeakerEncoder(mel_channels, embed_dim)
-        self.classifier = nn.Linear(embed_dim, num_speakers)
+        self.head = AAMSoftmax(embed_dim, num_speakers)
 
-    def forward(self, mel: torch.Tensor):
+    def forward(self, mel: torch.Tensor, labels: torch.Tensor | None = None):
         emb = self.encoder(mel)                # (B, embed_dim) L2-normalised
-        logits = self.classifier(emb)          # (B, num_speakers)
+        if labels is None:                     # embedding-only (inference)
+            return None, emb
+        logits = self.head(emb, labels)        # (B, num_speakers), margin applied
         return logits, emb
 
 
@@ -77,7 +80,7 @@ def _validate(model, val_loader, device, use_amp, speaker_id_remap=None):
             speaker_id = speaker_id_remap[speaker_id]
 
         with torch.amp.autocast(device_type=device.type, enabled=use_amp):
-            logits, _ = model(mel)
+            logits, _ = model(mel, speaker_id)
             loss = F.cross_entropy(logits, speaker_id)
 
         total_loss += loss.item() * mel.size(0)
@@ -98,43 +101,32 @@ def train_asv(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     processor = MelProcessor()
 
-    # ---- Build datasets ----
-    print("Building training dataset ...")
-    train_dataset = build_dataset(
-        vctk_root=args.vctk_root,
-        libritts_root=args.librispeech_root,
-        split="train",
-        libritts_subsets=args.librispeech_subsets,
-        processor=processor,
-    )
-    print("Building validation dataset ...")
-    val_dataset = build_dataset(
-        vctk_root=args.vctk_root,
-        libritts_root=args.librispeech_root,
-        split="test",
-        libritts_subsets=args.librispeech_subsets,
-        processor=processor,
-    )
+    # ---- Build datasets (VCTK and/or LibriTTS) with a UNIFIED speaker-label
+    # space via speaker_offset. Each corpus's speakers get a disjoint id range,
+    # so a combined ConcatDataset has no label collisions. Train/test instances
+    # share ids (each builds its map from ALL files), so no remap is needed. ----
+    print("Building datasets ...")
+    train_parts, val_parts, offset = [], [], 0
+    if args.vctk_root:
+        vtr = VCTKDataset(args.vctk_root, "train", processor=processor, speaker_offset=offset)
+        vva = VCTKDataset(args.vctk_root, "test", processor=processor, speaker_offset=offset)
+        print(f"  VCTK: {len(vtr.speaker_ids)} speakers (ids {offset}..{offset + len(vtr.speaker_ids) - 1})")
+        offset += len(vtr.speaker_ids)
+        train_parts.append(vtr); val_parts.append(vva)
+    if args.librispeech_root:
+        ltr = LibriSpeechDataset(args.librispeech_root, args.librispeech_subsets, "train",
+                                 processor=processor, speaker_offset=offset)
+        lva = LibriSpeechDataset(args.librispeech_root, args.librispeech_subsets, "test",
+                                 processor=processor, speaker_offset=offset)
+        print(f"  LibriTTS: {len(ltr.speaker_ids)} speakers (ids {offset}..{offset + len(ltr.speaker_ids) - 1})")
+        offset += len(ltr.speaker_ids)
+        train_parts.append(ltr); val_parts.append(lva)
 
-    num_speakers = len(train_dataset.speaker_ids)
-
-    # Build a remapping tensor so val speaker IDs align with train IDs.
-    # Both splits sort speaker names independently; if a speaker is absent
-    # from one split the indices will diverge.
-    train_spk_map = train_dataset.speaker_ids   # {name: idx}
-    val_spk_map = val_dataset.speaker_ids        # {name: idx}
-    remap_tensor = None
-    if train_spk_map != val_spk_map:
-        # Create val_idx → train_idx mapping
-        remap = torch.zeros(len(val_spk_map), dtype=torch.long)
-        for name, val_idx in val_spk_map.items():
-            if name in train_spk_map:
-                remap[val_idx] = train_spk_map[name]
-            else:
-                remap[val_idx] = 0  # fallback (won't affect training)
-                print(f"  [WARN] Val speaker '{name}' not in train set — ID mapped to 0")
-        remap_tensor = remap.to(device)
-        print(f"  Speaker ID remapping applied ({len(val_spk_map)} val → {num_speakers} train)")
+    train_dataset = ConcatDataset(train_parts) if len(train_parts) > 1 else train_parts[0]
+    val_dataset = ConcatDataset(val_parts) if len(val_parts) > 1 else val_parts[0]
+    num_speakers = offset
+    remap_tensor = None  # labels are globally consistent via speaker_offset
+    print(f"  Total: {num_speakers} speakers")
 
     train_loader = DataLoader(
         train_dataset,
@@ -307,11 +299,9 @@ if __name__ == "__main__":
     if args.no_amp:
         args.amp = False
 
-    # ASV does speaker classification, which needs ONE unified label space.
-    # Combining VCTK + LibriTTS here would produce a ConcatDataset with
-    # overlapping speaker ids (no .speaker_ids attribute) — reject that.
-    if bool(args.vctk_root) == bool(args.librispeech_root):
-        p.error("Provide exactly ONE of --vctk_root or --librispeech_root for ASV "
-                "training (a single corpus = one clean speaker-label space).")
+    # Need at least one corpus. Both are allowed — they get a unified label space
+    # via speaker_offset (disjoint id ranges), so combining is safe now.
+    if not args.vctk_root and not args.librispeech_root:
+        p.error("Provide --vctk_root and/or --librispeech_root for ASV training.")
 
     train_asv(args)
