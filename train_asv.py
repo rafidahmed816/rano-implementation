@@ -192,7 +192,7 @@ def train_asv(args):
                 mel = mel.squeeze(1)
 
             with torch.amp.autocast(device_type=device.type, enabled=use_amp):
-                logits, _ = model(mel)
+                logits, _ = model(mel, speaker_id)
                 loss = F.cross_entropy(logits, speaker_id)
 
             optimizer.zero_grad(set_to_none=True)
