@@ -34,8 +34,14 @@ MCD_SR = 16000
 
 # Mel clamping for HiFi-GAN vocoder (from quick_infer.py)
 # cINN pushes some frames below -11.5 dB; HiFi-GAN was never trained below this
-MEL_MIN = -11.5
-MEL_MAX = 2.0
+# Valid log-mel range for THIS project's mel (MelProcessor: log of power-2 mel,
+# clamped at 1e-5). Measured on real VCTK/LibriTTS audio: min -11.51, max 10.18.
+# MEL_MAX was 2.0 — ~5x too low, which silently clipped the entire loud/formant
+# structure off any mel it touched. 12.0 leaves headroom above real content while
+# still catching a true explosion (an exploded mel hits 88+, which overflows
+# float32 exp() and kills griffinlim).
+MEL_MIN = -11.6
+MEL_MAX = 12.0
 
 # ============================================================
 # SPECTRAL POST-FILTER
