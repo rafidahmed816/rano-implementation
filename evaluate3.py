@@ -424,8 +424,12 @@ def evaluate(args):
                 anon_wav_t = processor.mel_to_wav(xa_clamped.cpu())
                 anon_wav = anon_wav_t.squeeze(0).numpy()
             else:
+                # Clamp to the valid log-mel range before the vocoder's exp():
+                # an out-of-range mel overflows to Inf and griffinlim then dies with
+                # "Audio buffer is not finite everywhere". Mirrors the hifigan path
+                # above. restore() below still gets the RAW xa, so invertibility holds.
                 anon_wav = pseudo_inverse_vocoder(
-                    xa, orig_wav=wav_16k, sr=proc_sr,
+                    xa.clamp(MEL_MIN, MEL_MAX), orig_wav=wav_16k, sr=proc_sr,
                     n_fft=1024, hop_length=256, n_mels=80,
                     mode=anon_mode,
                     pitch_shift_semitones=args.pitch_shift,
@@ -444,7 +448,7 @@ def evaluate(args):
             else:
                 # phase_save gives maximum Sim_spk/MCD quality for pseudo-inverse
                 restored_wav = pseudo_inverse_vocoder(
-                    xr, orig_wav=wav_16k, sr=proc_sr,
+                    xr.clamp(MEL_MIN, MEL_MAX), orig_wav=wav_16k, sr=proc_sr,
                     n_fft=1024, hop_length=256, n_mels=80,
                     mode="phase_save",
                     griffinlim_iters=128,
