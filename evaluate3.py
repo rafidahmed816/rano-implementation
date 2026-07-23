@@ -329,8 +329,17 @@ def load_asv(device: torch.device):
     )
     os.symlink = _orig_symlink
 
-    def extract_emb(wav_tensor: torch.Tensor) -> np.ndarray:
+    def extract_emb(wav_tensor: torch.Tensor, sr: int = 16000) -> np.ndarray:
+        """wav_tensor: (T,) or (B,T). `sr` is the ACTUAL rate of wav_tensor.
+
+        ECAPA-TDNN is trained on 16 kHz. Feeding it proc_sr (22050) makes it hear
+        everything ~1.4x pitch-shifted and cripples it: measured on clean speech,
+        baseline EER 17.67% @22050 vs 5.67% @16000 (separation 0.327 vs 0.498).
+        A crippled attacker can't link anything, which INFLATES the reported EER.
+        """
         if wav_tensor.ndim == 1: wav_tensor = wav_tensor.unsqueeze(0)
+        if sr != 16000:
+            wav_tensor = torchaudio.functional.resample(wav_tensor, sr, 16000)
         with torch.no_grad(): return asv.encode_batch(wav_tensor).squeeze().cpu().numpy()
     return extract_emb
 
@@ -474,9 +483,11 @@ def evaluate(args):
             def to_tensor(w: np.ndarray) -> torch.Tensor:
                 return torch.tensor(w).float().to(device)
 
-            emb_o = extract_asv_emb(to_tensor(wav_16k))
-            emb_a = extract_asv_emb(to_tensor(anon_wav))
-            emb_r = extract_asv_emb(to_tensor(restored_wav))
+            # NOTE: wav_16k is misnamed -- line ~404 resamples to proc_sr (22050),
+            # not 16k. Pass the true rate so ECAPA resamples to the 16k it expects.
+            emb_o = extract_asv_emb(to_tensor(wav_16k), proc_sr)
+            emb_a = extract_asv_emb(to_tensor(anon_wav), proc_sr)
+            emb_r = extract_asv_emb(to_tensor(restored_wav), proc_sr)
 
             embeddings["orig"][spk].append(emb_o)
             embeddings["anon"][spk].append(emb_a)

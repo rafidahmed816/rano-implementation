@@ -235,3 +235,14 @@ Just **re-run the exact same command** in tmux. Stage B and Stage C write a
 - **Final EER looks off** → the pseudo-inverse vocoder is unreliable for EER; use
   `check_anon.py`'s cosine as the real anonymization signal, and a matched neural
   vocoder (BigVGAN/HiFi-GAN) for final numbers.
+
+
+$Server = "cse@103.82.172.195"; $Port = 2222
+python train_stage2.py --vctk_root /mnt/storage/data/VCTK-Corpus-0.92 \
+  --libritts_root /mnt/storage/data/LibriTTS --librispeech_subsets train-clean-100 \
+  --asv_checkpoint checkpoints/asv_ecapa.pt \
+  --acg_checkpoint checkpoints/acg_ecapa/acg_final.pt \
+  --output_dir /mnt/storage/checkpoints/rano_ecapa --log_dir /mnt/storage/logs/rano_ecapa \
+  --batch_size 128 --iterations 200000 --lr 1e-5 \
+  --lambda1 1 --lambda2 5 --lambda_logdet 0.01 --lambda_anchor 0.2 --lambda_range 1.0 \
+  --val_every 1000 --num_workers 8 --amp
