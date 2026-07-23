@@ -1,11 +1,11 @@
 {
-  "gvd": 0.1692230995123585,
-  "rho_f0": 0.14241933373778118,
+  "gvd": 1.4479862615466117,
+  "rho_f0": 0.374303670364904,
   "wer": NaN,
-  "sim_spk_restored": 52.05705205599467,
-  "mcd_restored": 635.6281758249502,
-  "eer": 17.74122807004633,
+  "sim_spk_restored": 98.38673517107964,
+  "mcd_restored": 55.66536260896208,
+  "eer": 32.80701754390398,
   "vocoder": "pseudoinverse",
-  "anon_mode": "phase_save",
-  "post_filter": true
+  "anon_mode": "griffinlim",
+  "post_filter": false
 }
