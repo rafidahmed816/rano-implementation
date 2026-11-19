@@ -348,6 +348,28 @@ def load_asv(device: torch.device):
 # MAIN EVALUATION
 # ============================================================
 
+def load_custom_vocoder(ckpt_path: str, device: torch.device):
+    """Load OUR fine-tuned HiFi-GAN (train_vocoder.py) -- the only neural vocoder that
+    matches this project's mel (torchaudio htk / power-2 / log). The stock `hifigan`
+    mode uses SpeechBrain's LJSpeech model, which expects a slaney/power-1 mel and so
+    produces garbage on our features. Model is loaded ONCE and reused."""
+    from hifigan import Generator
+    G = Generator().to(device).eval()
+    st = torch.load(ckpt_path, map_location=device, weights_only=False)
+    G.load_state_dict(st["gen"] if "gen" in st else st)
+    G.remove_wn()  # fold weight-norm for faster inference
+    step = st.get("step", "?") if isinstance(st, dict) else "?"
+    print(f"[OK] custom HiFi-GAN loaded from {ckpt_path} (step {step})")
+
+    @torch.no_grad()
+    def vocode(mel: torch.Tensor) -> np.ndarray:
+        """log-mel (1,80,T) -> waveform (T_wav,) at 22050 Hz."""
+        if mel.dim() == 2:
+            mel = mel.unsqueeze(0)
+        return G(mel.to(device)).squeeze().cpu().numpy()
+    return vocode
+
+
 def safe_mean(arr: list) -> float:
     clean = [x for x in arr if not np.isnan(x) and not np.isinf(x)]
     return float(np.mean(clean)) if clean else float("nan")
@@ -355,6 +377,13 @@ def safe_mean(arr: list) -> float:
 
 def evaluate(args):
     start_time = time.time()
+    # Pseudo-speaker keys are drawn with torch.randn. Unseeded, every run anonymizes
+    # to DIFFERENT pseudo-identities, so the same checkpoint scored e.g. 31.81 and
+    # 32.31 EER on two runs. Seeding makes a run reproducible; vary --seed across
+    # runs to report EER as mean +/- std instead of a single noisy number.
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    print(f"Seed: {args.seed}")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
@@ -375,6 +404,14 @@ def evaluate(args):
     # the mel filterbank produces OOD inputs for the 22050Hz-trained model.
     processor = MelProcessor(device=device, use_hifigan=(vocoder_mode == "hifigan"), sample_rate=22050)
     proc_sr = 22050
+
+    # Our own fine-tuned HiFi-GAN (mel-matched). Loaded once, reused for every utterance.
+    custom_vocode = None
+    if vocoder_mode == "hifigan_custom":
+        if not args.vocoder_ckpt:
+            raise SystemExit("--vocoder hifigan_custom requires --vocoder_ckpt "
+                             "(e.g. checkpoints/vocoder_ft/generator.pt)")
+        custom_vocode = load_custom_vocoder(args.vocoder_ckpt, device)
 
     rano_model = load_rano(args, device)
     extract_asv_emb = load_asv(device)
@@ -434,7 +471,9 @@ def evaluate(args):
             # ── 1. Anonymize ─────────────────────────────────────────────────
             xa, cond = rano_model.anonymize(mel, key)
 
-            if vocoder_mode == "hifigan":
+            if vocoder_mode == "hifigan_custom":
+                anon_wav = custom_vocode(xa.clamp(MEL_MIN, MEL_MAX))
+            elif vocoder_mode == "hifigan":
                 xa_clamped = xa.clamp(MEL_MIN, MEL_MAX)
                 anon_wav_t = processor.mel_to_wav(xa_clamped.cpu())
                 anon_wav = anon_wav_t.squeeze(0).numpy()
@@ -456,7 +495,9 @@ def evaluate(args):
             # ── 2. Restore ───────────────────────────────────────────────────
             xr = rano_model.restore(xa, key)
 
-            if vocoder_mode == "hifigan":
+            if vocoder_mode == "hifigan_custom":
+                restored_wav = custom_vocode(xr.clamp(MEL_MIN, MEL_MAX))
+            elif vocoder_mode == "hifigan":
                 xr_clamped = xr.clamp(MEL_MIN, MEL_MAX)
                 restored_wav_t = processor.mel_to_wav(xr_clamped.cpu())
                 restored_wav = restored_wav_t.squeeze(0).numpy()
@@ -548,7 +589,9 @@ def evaluate(args):
     print(f" MCD (dB)                   {result['mcd_restored']:>5.2f}    v better  Table III")
     print("=" * 70)
 
-    out_path = f"eval_results_{vocoder_mode}.json"
+    result["seed"] = args.seed
+    # Seed in the filename so multi-seed runs don't overwrite each other.
+    out_path = f"eval_results_{vocoder_mode}_seed{args.seed}.json"
     with open(out_path, "w") as f:
         json.dump(result, f, indent=2)
     print(f"\nResults saved to {out_path}")
@@ -564,6 +607,9 @@ if __name__ == "__main__":
     p.add_argument("--acg_checkpoint",    required=True)
     p.add_argument("--anonymizer_ckpt",   required=True)
     p.add_argument("--embed_dim",         type=int,   default=256)
+    p.add_argument("--seed",              type=int,   default=0,
+                   help="Seeds the pseudo-speaker keys. Vary it (0,1,2) across runs "
+                        "to report EER as mean +/- std.")
     p.add_argument("--num_cinn_blocks",   type=int,   default=12)
     p.add_argument("--compute_wer",       action="store_true")
     p.add_argument("--whisper_model",     type=str, default="large",
@@ -576,12 +622,17 @@ if __name__ == "__main__":
         "--vocoder",
         type=str,
         default="pseudoinverse",
-        choices=["hifigan", "pseudoinverse"],
+        choices=["hifigan", "hifigan_custom", "pseudoinverse"],
         help=(
-            "hifigan: neural vocoder matching paper §IV-A (default). "
-            "pseudoinverse: Griffin-Lim / perturbed-phase mathematical vocoder."
+            "hifigan_custom: OUR fine-tuned HiFi-GAN (train_vocoder.py) -- the only "
+            "neural vocoder matched to this project's mel; needs --vocoder_ckpt. "
+            "hifigan: SpeechBrain LJSpeech model -- WRONG mel domain (slaney/power-1), "
+            "produces garbage here. pseudoinverse: Griffin-Lim (honest but phase-limited)."
         ),
     )
+    p.add_argument("--vocoder_ckpt", type=str, default=None,
+                   help="Generator checkpoint for --vocoder hifigan_custom "
+                        "(e.g. checkpoints/vocoder_ft/generator.pt).")
     # Pseudo-inverse vocoder controls (only used when --vocoder=pseudoinverse)
     p.add_argument(
         "--anon_mode",
