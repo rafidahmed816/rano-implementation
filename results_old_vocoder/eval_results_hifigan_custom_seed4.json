@@ -1,0 +1,12 @@
+{
+  "gvd": 1.1821751532455285,
+  "rho_f0": 0.41720748181384976,
+  "wer": NaN,
+  "sim_spk_restored": 96.71234647432964,
+  "mcd_restored": 66.90513244674707,
+  "eer": 24.94883040921613,
+  "vocoder": "hifigan_custom",
+  "anon_mode": "perturbed_phase",
+  "post_filter": false,
+  "seed": 4
+}

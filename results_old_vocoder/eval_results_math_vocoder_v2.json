@@ -1,0 +1,10 @@
+{
+  "gvd": 1.397238585256761,
+  "rho_f0": 0.09881019183239949,
+  "wer": 44.25535969412352,
+  "sim_spk_restored": 91.60423096149198,
+  "mcd_restored": 52.40440918321726,
+  "eer": 52.22727272735983,
+  "anon_mode": "perturbed_phase",
+  "post_filter": false
+}

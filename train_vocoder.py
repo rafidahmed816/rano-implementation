@@ -48,12 +48,22 @@ class WavSegments(Dataset):
             raise SystemExit("No .wav/.flac found under the given roots.")
         self.segment = segment
         self.proc = MelProcessor(sample_rate=sr)
-        random.seed(0)
+        self._rng = None   # per-worker RNG, built lazily (see __getitem__)
 
     def __len__(self):
         return len(self.files)
 
+    def _get_rng(self):
+        # Each DataLoader worker must get its OWN seed. A single module-level
+        # random.seed(0) gives every worker an identical stream, so they pick
+        # correlated crop offsets and the effective data diversity drops.
+        if self._rng is None:
+            info = torch.utils.data.get_worker_info()
+            self._rng = random.Random(1234 + (info.id if info is not None else 0))
+        return self._rng
+
     def __getitem__(self, idx):
+        rng = self._get_rng()
         for _ in range(20):
             try:
                 w, sr = sf.read(self.files[idx])
@@ -64,11 +74,11 @@ class WavSegments(Dataset):
                 if w.shape[-1] < self.segment:
                     w = F.pad(w, (0, self.segment - w.shape[-1]))
                 else:
-                    s = random.randint(0, w.shape[-1] - self.segment)
+                    s = rng.randint(0, w.shape[-1] - self.segment)
                     w = w[s:s + self.segment]
                 return w
             except Exception:
-                idx = random.randint(0, len(self.files) - 1)
+                idx = rng.randint(0, len(self.files) - 1)
         raise RuntimeError("Repeated decode failures in WavSegments.")
 
 
@@ -184,6 +194,16 @@ def train(args):
             ckpt.with_suffix(".pt.tmp").replace(ckpt)
             torch.save({"gen": G.state_dict(), "step": step}, out / "generator.pt")
             print(f"  [ckpt] saved at step {step}", flush=True)
+        if step % args.sample_every == 0:
+            # Dump a real/generated pair so quality can be judged BY EAR during the
+            # run, instead of waiting for it to finish. Overwrites the same two files.
+            with torch.no_grad():
+                sf.write(str(out / "sample_real.wav"),
+                         y[0, 0].detach().cpu().numpy().astype("float32"), args.sr)
+                sf.write(str(out / "sample_generated.wav"),
+                         y_g[0, 0].detach().cpu().numpy().astype("float32"), args.sr)
+            print(f"  [sample] wrote sample_real.wav / sample_generated.wav @ step {step}",
+                  flush=True)
 
     print("Vocoder training complete.")
 
@@ -216,4 +236,6 @@ if __name__ == "__main__":
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--log_every", type=int, default=100)
     p.add_argument("--save_every", type=int, default=2000)
+    p.add_argument("--sample_every", type=int, default=1000,
+                   help="Dump sample_real.wav / sample_generated.wav for listening.")
     train(p.parse_args())

@@ -1,0 +1,11 @@
+{
+  "gvd": 1.233982536693414,
+  "rho_f0": 0.4256278163330105,
+  "wer": NaN,
+  "sim_spk_restored": 99.16637892524402,
+  "mcd_restored": 52.391189160634575,
+  "eer": 26.16959064338741,
+  "vocoder": "pseudoinverse",
+  "anon_mode": "griffinlim",
+  "post_filter": false
+}

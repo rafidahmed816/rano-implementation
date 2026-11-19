@@ -237,7 +237,7 @@ Just **re-run the exact same command** in tmux. Stage B and Stage C write a
   vocoder (BigVGAN/HiFi-GAN) for final numbers.
 
 
-$Server = "cse@103.82.172.195"; $Port = 2222
+$Server = "user@YOUR.SERVER.IP"; $Port = 22   # set to your server
 python train_stage2.py --vctk_root /mnt/storage/data/VCTK-Corpus-0.92 \
   --libritts_root /mnt/storage/data/LibriTTS --librispeech_subsets train-clean-100 \
   --asv_checkpoint checkpoints/asv_ecapa.pt \
